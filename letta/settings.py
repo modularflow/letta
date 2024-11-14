@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import Optional
 
+import os
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -62,12 +64,12 @@ class Settings(BaseSettings):
     cors_origins: Optional[list] = cors_origins
 
     # database configuration
-    pg_db: Optional[str] = None
-    pg_user: Optional[str] = None
-    pg_password: Optional[str] = None
-    pg_host: Optional[str] = None
-    pg_port: Optional[int] = None
-    pg_uri: Optional[str] = None  # option to specifiy full uri
+    pg_db: Optional[str] = os.environ.get("PGDATABASE")
+    pg_user: Optional[str] = os.environ.get("PGUSER")
+    pg_password: Optional[str] = os.environ.get("PGPASSWORD")
+    pg_host: Optional[str] = os.environ.get("PGHOST")
+    pg_port: Optional[int] = 5432
+    pg_uri: Optional[str] = os.environ.get("DATABASE_URL")
 
     # tools configuration
     load_default_external_tools: Optional[bool] = None

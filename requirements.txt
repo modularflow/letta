@@ -1,0 +1,15 @@
+typer[all]
+questionary
+fastapi
+uvicorn
+pydantic
+sqlalchemy
+psycopg2-binary
+pgvector
+sqlalchemy-json
+sqlmodel
+python-multipart
+sqlalchemy-utils
+httpx
+numpy
+python-box
