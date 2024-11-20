@@ -73,9 +73,17 @@ class LLMConfig(BaseModel):
         Args:
             model_name (str): The name of the model (gpt-4, gpt-4o-mini, letta).
         """
-        if model_name == "gpt-4":
+        if model_name == "ollama":
             return cls(
-                model="gpt-4",
+                model="llama3.1:latest",
+                model_endpoint_type="ollama",
+                model_endpoint="http://localhost:11434",
+                model_wrapper=None,
+                context_window=8192,
+            )
+        elif model_name == "gpt-4o":
+            return cls(
+                model="gpt-4o",
                 model_endpoint_type="openai",
                 model_endpoint="https://api.openai.com/v1",
                 model_wrapper=None,
