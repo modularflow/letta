@@ -34,7 +34,16 @@ class EmbeddingConfig(BaseModel):
     @classmethod
     def default_config(cls, model_name: Optional[str] = None, provider: Optional[str] = None):
 
-        if model_name == "text-embedding-ada-002" or (not model_name and provider == "openai"):
+        if model_name == "ollama":
+            return cls(
+                embedding_model="nomic-embed-text:latest",
+                embedding_endpoint_type="ollama",
+                embedding_endpoint="None",
+                embedding_dim=768,
+                embedding_chunk_size=300,
+            )
+        
+        elif model_name == "text-embedding-ada-002" or (not model_name and provider == "openai"):
             return cls(
                 embedding_model="text-embedding-ada-002",
                 embedding_endpoint_type="openai",

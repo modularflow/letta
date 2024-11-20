@@ -89,8 +89,8 @@ LLM_MAX_TOKENS = {
     # "gpt-4o-realtime-preview-2024-10-01
     "gpt-4-turbo": 8192,
     "gpt-4o-2024-05-13": 128000,
-    # "o1-mini
-    # "o1-mini-2024-09-12
+    "o1-mini": 128000,
+    "o1-preview" : 128000,
     # "gpt-3.5-turbo-instruct-0914
     "gpt-4o-mini": 128000,
     # "gpt-4o-realtime-preview
