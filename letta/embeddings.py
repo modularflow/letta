@@ -98,7 +98,7 @@ class EmbeddingEndpoint:
         self._base_url = base_url
         self._timeout = timeout
 
-    def _call_api(self, text: str) -> List[float]:
+    async def _call_api(self, text: str) -> List[float]:
         if not is_valid_url(self._base_url):
             raise ValueError(
                 f"Embeddings endpoint does not have a valid URL (set to: '{self._base_url}'). Make sure embedding_endpoint is set correctly in your Letta config."
@@ -108,8 +108,8 @@ class EmbeddingEndpoint:
         headers = {"Content-Type": "application/json"}
         json_data = {"input": text, "model": self.model_name, "user": self._user}
 
-        with httpx.Client() as client:
-            response = client.post(
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
                 f"{self._base_url}/embeddings",
                 headers=headers,
                 json=json_data,
@@ -133,8 +133,8 @@ class EmbeddingEndpoint:
 
         return embedding
 
-    def get_text_embedding(self, text: str) -> List[float]:
-        return self._call_api(text)
+    async def get_text_embedding(self, text: str) -> List[float]:
+        return await self._call_api(text)
 
 
 class AzureOpenAIEmbedding:
@@ -159,15 +159,15 @@ def default_embedding_model():
     return HuggingFaceEmbedding(model_name=model)
 
 
-def query_embedding(embedding_model, query_text: str):
+async def query_embedding(embedding_model, query_text: str):
     """Generate padded embedding for querying database"""
-    query_vec = embedding_model.get_text_embedding(query_text)
+    query_vec = await embedding_model.get_text_embedding(query_text)
     query_vec = np.array(query_vec)
     query_vec = np.pad(query_vec, (0, MAX_EMBEDDING_DIM - query_vec.shape[0]), mode="constant").tolist()
     return query_vec
 
 
-def embedding_model(config: EmbeddingConfig, user_id: Optional[uuid.UUID] = None):
+async def embedding_model(config: EmbeddingConfig, user_id: Optional[uuid.UUID] = None):
     """Return LlamaIndex embedding model to use for embeddings"""
 
     endpoint_type = config.embedding_endpoint_type

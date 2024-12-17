@@ -1,6 +1,7 @@
 from collections import defaultdict
 
 import requests
+import httpx
 
 from letta.llm_api.helpers import make_post_request
 from letta.schemas.llm_config import LLMConfig
@@ -100,8 +101,11 @@ def azure_openai_get_embeddings_model_list(base_url: str, api_key: str, api_vers
     return model_options
 
 
-def azure_openai_chat_completions_request(
-    model_settings: ModelSettings, llm_config: LLMConfig, api_key: str, chat_completion_request: ChatCompletionRequest
+async def azure_openai_chat_completions_request(
+    model_settings: ModelSettings,
+    llm_config: LLMConfig,
+    api_key: str,
+    chat_completion_request: ChatCompletionRequest
 ) -> ChatCompletionResponse:
     """https://learn.microsoft.com/en-us/azure/ai-services/openai/reference#chat-completions"""
 
@@ -119,13 +123,17 @@ def azure_openai_chat_completions_request(
         data.pop("tools")
         data.pop("tool_choice", None)  # extra safe,  should exist always (default="auto")
 
-    url = get_azure_chat_completions_endpoint(model_settings.azure_base_url, llm_config.model, model_settings.azure_api_version)
-    response_json = make_post_request(url, headers, data)
-    # NOTE: azure openai does not include "content" in the response when it is None, so we need to add it
-    if "content" not in response_json["choices"][0].get("message"):
-        response_json["choices"][0]["message"]["content"] = None
-    response = ChatCompletionResponse(**response_json)  # convert to 'dot-dict' style which is the openai python client default
-    return response
+    url = get_azure_chat_completions_endpoint(
+        model_settings.azure_base_url, 
+        llm_config.model, 
+        model_settings.azure_api_version
+    )
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, json=data, headers=headers)
+        response.raise_for_status()
+        response_json = response.json()
+        return ChatCompletionResponse(**response_json)
 
 
 def azure_openai_embeddings_request(

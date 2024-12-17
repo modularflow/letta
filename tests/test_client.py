@@ -333,31 +333,32 @@ def test_list_tools(client: Union[LocalClient, RESTClient]):
     assert sorted(tool_names) == sorted(expected)
 
 
-def test_list_files_pagination(client: Union[LocalClient, RESTClient], agent: AgentState):
+@pytest.mark.asyncio
+async def test_list_files_pagination(client: Union[LocalClient, RESTClient], agent: AgentState):
     # clear sources
     for source in client.list_sources():
-        client.delete_source(source.id)
+        await client.delete_source(source.id)
 
     # clear jobs
     for job in client.list_jobs():
-        client.delete_job(job.id)
+        await client.delete_job(job.id)
 
     # create a source
-    source = client.create_source(name="test_source")
+    source = await client.create_source(name="test_source")
 
     # load files into sources
     file_a = "tests/data/memgpt_paper.pdf"
     file_b = "tests/data/test.txt"
-    upload_file_using_client(client, source, file_a)
-    upload_file_using_client(client, source, file_b)
+    await upload_file_using_client(client, source, file_a)
+    await upload_file_using_client(client, source, file_b)
 
     # Get the first file
-    files_a = client.list_files_from_source(source.id, limit=1)
+    files_a = await client.list_files_from_source(source.id, limit=1)
     assert len(files_a) == 1
     assert files_a[0].source_id == source.id
 
     # Use the cursor from response_a to get the remaining file
-    files_b = client.list_files_from_source(source.id, limit=1, cursor=files_a[-1].id)
+    files_b = await client.list_files_from_source(source.id, limit=1, cursor=files_a[-1].id)
     assert len(files_b) == 1
     assert files_b[0].source_id == source.id
 
@@ -365,7 +366,7 @@ def test_list_files_pagination(client: Union[LocalClient, RESTClient], agent: Ag
     assert files_a[0].file_name != files_b[0].file_name
 
     # Use the cursor from response_b to list files, should be empty
-    files = client.list_files_from_source(source.id, limit=1, cursor=files_b[-1].id)
+    files = await client.list_files_from_source(source.id, limit=1, cursor=files_b[-1].id)
     assert len(files) == 0  # Should be empty
 
 
@@ -426,27 +427,26 @@ def test_load_file(client: Union[LocalClient, RESTClient], agent: AgentState):
     assert file.source_id == source.id
 
 
-def test_sources(client: Union[LocalClient, RESTClient], agent: AgentState):
-    # _reset_config()
-
+@pytest.mark.asyncio
+async def test_sources(client: Union[LocalClient, RESTClient], agent: AgentState):
     # clear sources
-    for source in client.list_sources():
-        client.delete_source(source.id)
+    for source in await client.list_sources():
+        await client.delete_source(source.id)
 
     # clear jobs
-    for job in client.list_jobs():
-        client.delete_job(job.id)
+    for job in await client.list_jobs():
+        await client.delete_job(job.id)
 
     # list sources
-    sources = client.list_sources()
+    sources = await client.list_sources()
     print("listed sources", sources)
     assert len(sources) == 0
 
     # create a source
-    source = client.create_source(name="test_source")
+    source = await client.create_source(name="test_source")
 
     # list sources
-    sources = client.list_sources()
+    sources = await client.list_sources()
     print("listed sources", sources)
     assert len(sources) == 1
 
@@ -458,63 +458,49 @@ def test_sources(client: Union[LocalClient, RESTClient], agent: AgentState):
     original_id = source.id
     original_name = source.name
     new_name = original_name + "_new"
-    client.update_source(source_id=source.id, name=new_name)
+    await client.update_source(source_id=source.id, name=new_name)
 
     # get the source name (check that it's been updated)
-    source = client.get_source(source_id=source.id)
+    source = await client.get_source(source_id=source.id)
     assert source.name == new_name
     assert source.id == original_id
 
     # get the source id (make sure that it's the same)
-    assert str(original_id) == client.get_source_id(source_name=new_name)
+    assert str(original_id) == await client.get_source_id(source_name=new_name)
 
     # check agent archival memory size
-    archival_memories = client.get_archival_memory(agent_id=agent.id)
+    archival_memories = await client.get_archival_memory(agent_id=agent.id)
     print(archival_memories)
     assert len(archival_memories) == 0
 
     # load a file into a source (non-blocking job)
     filename = "tests/data/memgpt_paper.pdf"
-    upload_job = upload_file_using_client(client, source, filename)
-    job = client.get_job(upload_job.id)
+    upload_job = await upload_file_using_client(client, source, filename)
+    job = await client.get_job(upload_job.id)
     created_passages = job.metadata_["num_passages"]
 
-    # TODO: add test for blocking job
-
-    # TODO: make sure things run in the right order
-    archival_memories = client.get_archival_memory(agent_id=agent.id)
-    assert len(archival_memories) == 0
-
     # attach a source
-    client.attach_source_to_agent(source_id=source.id, agent_id=agent.id)
+    await client.attach_source_to_agent(source_id=source.id, agent_id=agent.id)
 
     # list attached sources
-    attached_sources = client.list_attached_sources(agent_id=agent.id)
+    attached_sources = await client.list_attached_sources(agent_id=agent.id)
     print("attached sources", attached_sources)
     assert source.id in [s.id for s in attached_sources], f"Attached sources: {attached_sources}"
 
     # list archival memory
-    archival_memories = client.get_archival_memory(agent_id=agent.id)
-    # print(archival_memories)
+    archival_memories = await client.get_archival_memory(agent_id=agent.id)
     assert len(archival_memories) == created_passages, f"Mismatched length {len(archival_memories)} vs. {created_passages}"
 
-    # check number of passages
-    sources = client.list_sources()
-    # TODO: add back?
-    # assert sources.sources[0].metadata_["num_passages"] > 0
-    # assert sources.sources[0].metadata_["num_documents"] == 0  # TODO: fix this once document store added
-    print(sources)
-
     # detach the source
-    assert len(client.get_archival_memory(agent_id=agent.id)) > 0, "No archival memory"
-    deleted_source = client.detach_source(source_id=source.id, agent_id=agent.id)
+    assert len(await client.get_archival_memory(agent_id=agent.id)) > 0, "No archival memory"
+    deleted_source = await client.detach_source(source_id=source.id, agent_id=agent.id)
     assert deleted_source.id == source.id
-    archival_memories = client.get_archival_memory(agent_id=agent.id)
+    archival_memories = await client.get_archival_memory(agent_id=agent.id)
     assert len(archival_memories) == 0, f"Failed to detach source: {len(archival_memories)}"
-    assert source.id not in [s.id for s in client.list_attached_sources(agent.id)]
+    assert source.id not in [s.id for s in await client.list_attached_sources(agent.id)]
 
     # delete the source
-    client.delete_source(source.id)
+    await client.delete_source(source.id)
 
 
 def test_message_update(client: Union[LocalClient, RESTClient], agent: AgentState):

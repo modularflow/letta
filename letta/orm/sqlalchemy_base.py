@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING, List, Literal, Optional, Type
 
 from sqlalchemy import String, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from letta.log import get_logger
@@ -10,8 +11,7 @@ from letta.orm.errors import NoResultFound
 if TYPE_CHECKING:
     from pydantic import BaseModel
     from sqlalchemy.orm import Session
-
-    # from letta.orm.user import User
+    from letta.schemas.user import User
 
 logger = get_logger(__name__)
 
@@ -174,3 +174,110 @@ class SqlalchemyBase(CommonSqlalchemyMetaMixins, Base):
         """Deprecated accessor for to_pydantic"""
         logger.warning("to_record is deprecated, use to_pydantic instead.")
         return self.to_pydantic()
+
+    @classmethod
+    async def alist(
+        cls, *, db_session: "AsyncSession", cursor: Optional[str] = None, limit: Optional[int] = 50, **kwargs
+    ) -> List[Type["SqlalchemyBase"]]:
+        """Async version of list records with optional cursor (for pagination) and limit."""
+        async with db_session as session:
+            # Start with the base query filtered by kwargs
+            query = select(cls).filter_by(**kwargs)
+
+            # Add a cursor condition if provided
+            if cursor:
+                query = query.where(cls.id > cursor)
+
+            # Add a limit to the query if provided
+            query = query.order_by(cls.id).limit(limit)
+
+            # Handle soft deletes if the class has the 'is_deleted' attribute
+            if hasattr(cls, "is_deleted"):
+                query = query.where(cls.is_deleted == False)
+
+            # Execute the query and return the results as a list of model instances
+            result = await session.execute(query)
+            return list(result.scalars())
+
+    @classmethod
+    async def aread(
+        cls,
+        db_session: "AsyncSession",
+        identifier: Optional[str] = None,
+        actor: Optional["User"] = None,
+        access: Optional[List[Literal["read", "write", "admin"]]] = ["read"],
+        **kwargs,
+    ) -> Type["SqlalchemyBase"]:
+        """Async version of read."""
+        query = select(cls)
+        query_conditions = []
+
+        if identifier:
+            query = query.where(cls.id == identifier)
+            query_conditions.append(f"id='{identifier}'")
+
+        if kwargs:
+            query = query.filter_by(**kwargs)
+            query_conditions.append(", ".join(f"{key}='{value}'" for key, value in kwargs.items()))
+
+        if actor:
+            query = cls.apply_access_predicate(query, actor, access)
+            query_conditions.append(f"access level in {access} for actor='{actor}'")
+
+        if hasattr(cls, "is_deleted"):
+            query = query.where(cls.is_deleted == False)
+            query_conditions.append("is_deleted=False")
+
+        result = await db_session.execute(query)
+        if found := result.scalar():
+            return found
+
+        # Construct a detailed error message based on query conditions
+        conditions_str = ", ".join(query_conditions) if query_conditions else "no specific conditions"
+        raise NoResultFound(f"{cls.__name__} not found with {conditions_str}")
+
+    async def acreate(self, db_session: "AsyncSession", actor: Optional["User"] = None) -> Type["SqlalchemyBase"]:
+        """Async version of create."""
+        if actor:
+            self._set_created_and_updated_by_fields(actor.id)
+
+        async with db_session as session:
+            session.add(self)
+            await session.commit()
+            await session.refresh(self)
+            return self
+
+    async def adelete(self, db_session: "AsyncSession", actor: Optional["User"] = None) -> Type["SqlalchemyBase"]:
+        """Async version of delete."""
+        if actor:
+            self._set_created_and_updated_by_fields(actor.id)
+
+        self.is_deleted = True
+        return await self.aupdate(db_session)
+
+    async def ahard_delete(self, db_session: "AsyncSession", actor: Optional["User"] = None) -> None:
+        """Async version of hard_delete."""
+        if actor:
+            logger.info(f"User {actor.id} requested hard deletion of {self.__class__.__name__} with ID {self.id}")
+
+        async with db_session as session:
+            try:
+                await session.delete(self)
+                await session.commit()
+            except Exception as e:
+                await session.rollback()
+                logger.exception(f"Failed to hard delete {self.__class__.__name__} with ID {self.id}")
+                raise ValueError(f"Failed to hard delete {self.__class__.__name__} with ID {self.id}: {e}")
+            else:
+                logger.info(f"{self.__class__.__name__} with ID {self.id} successfully hard deleted")
+
+    async def aupdate(self, db_session: "AsyncSession", actor: Optional["User"] = None) -> Type["SqlalchemyBase"]:
+        """Async version of update."""
+        if actor:
+            self._set_created_and_updated_by_fields(actor.id)
+
+        async with db_session as session:
+            session.add(self)
+            await session.commit()
+            await session.refresh(self)
+            return self

@@ -8,7 +8,7 @@ from letta.utils import count_tokens
 OLLAMA_API_SUFFIX = "/api/generate"
 
 
-def get_ollama_completion(endpoint, auth_type, auth_key, model, prompt, context_window, grammar=None):
+async def get_ollama_completion(endpoint, auth_type, auth_key, model, prompt, context_window, grammar=None):
     """See https://github.com/jmorganca/ollama/blob/main/docs/api.md for instructions on how to run the LLM web server"""
     from letta.utils import printd
 
@@ -58,7 +58,7 @@ def get_ollama_completion(endpoint, auth_type, auth_key, model, prompt, context_
 
     try:
         URI = urljoin(endpoint.strip("/") + "/", OLLAMA_API_SUFFIX.strip("/"))
-        response = post_json_auth_request(uri=URI, json_payload=request, auth_type=auth_type, auth_key=auth_key)
+        response = await post_json_auth_request(uri=URI, json_payload=request, auth_type=auth_type, auth_key=auth_key)
         if response.status_code == 200:
             # https://github.com/jmorganca/ollama/blob/main/docs/api.md
             result_full = response.json()

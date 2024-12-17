@@ -1,7 +1,7 @@
 from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, root_validator
-
+from letta.local_llm.llm_chat_completion_wrappers.llama3 import LLaMA3InnerMonologueWrapper
 
 class LLMConfig(BaseModel):
     """
@@ -73,6 +73,9 @@ class LLMConfig(BaseModel):
         Args:
             model_name (str): The name of the model (gpt-4, gpt-4o-mini, letta).
         """
+
+            
+                
         if model_name == "ollama":
             return cls(
                 model="llama3.1:latest",
@@ -81,13 +84,21 @@ class LLMConfig(BaseModel):
                 model_wrapper=None,
                 context_window=8192,
             )
+        elif model_name == "sonnet":
+            return cls(
+                model="claude-3-5-sonnet-20240620",
+                model_endpoint_type="anthropic",
+                model_endpoint="https://api.anthropic.com/v1/messages",
+                model_wrapper=None,
+                context_window=200000,
+            )
         elif model_name == "gpt-4o":
             return cls(
                 model="gpt-4o",
                 model_endpoint_type="openai",
                 model_endpoint="https://api.openai.com/v1",
                 model_wrapper=None,
-                context_window=8192,
+                context_window=128000,
             )
         elif model_name == "gpt-4o-mini":
             return cls(

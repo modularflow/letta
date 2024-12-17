@@ -402,59 +402,52 @@ class PostgresStorageConnector(SQLStorageConnector):
         records = [result.to_record() for result in results]
         return records
 
-    def insert_many(self, records, exists_ok=True, show_progress=False):
-        # TODO: this is terrible, should eventually be done the same way for all types (migrate to SQLModel)
+    async def insert_many(self, records, exists_ok=True, show_progress=False):
         if len(records) == 0:
             return
 
-        added_ids = []  # avoid adding duplicates
-        # NOTE: this has not great performance due to the excessive commits
-        with self.session_maker() as session:
+        added_ids = []
+        async with self.session_maker() as session:
             iterable = tqdm(records) if show_progress else records
             for record in iterable:
-                # db_record = self.db_model(**vars(record))
-
                 if record.id in added_ids:
                     continue
 
-                existing_record = session.query(self.db_model).filter_by(id=record.id).first()
+                existing_record = await session.query(self.db_model).filter_by(id=record.id).first()
                 if existing_record:
                     if exists_ok:
                         fields = record.model_dump()
                         fields.pop("id")
-                        session.query(self.db_model).filter(self.db_model.id == record.id).update(fields)
-                        print(f"Updated record with id {record.id}")
-                        session.commit()
+                        await session.query(self.db_model).filter(self.db_model.id == record.id).update(fields)
+                        await session.commit()
                     else:
                         raise ValueError(f"Record with id {record.id} already exists.")
-
                 else:
                     db_record = self.db_model(**record.dict())
                     session.add(db_record)
-                    print(f"Added record with id {record.id}")
-                    session.commit()
+                    await session.commit()
 
                 added_ids.append(record.id)
 
-    def insert(self, record, exists_ok=True):
-        self.insert_many([record], exists_ok=exists_ok)
+    async def insert(self, record, exists_ok=True):
+        await self.insert_many([record], exists_ok=exists_ok)
 
-    def update(self, record):
-        """
-        Updates a record in the database based on the provided Record object.
-        """
-        with self.session_maker() as session:
-            # Find the record by its ID
-            db_record = session.query(self.db_model).filter_by(id=record.id).first()
+    async def update(self, record):
+        if not record.id:
+            raise ValueError("Record must have an id.")
+
+        async with self.session_maker() as session:
+            db_record = await session.query(self.db_model).filter_by(id=record.id).first()
             if not db_record:
                 raise ValueError(f"Record with id {record.id} does not exist.")
 
-            # Update the record with new values from the provided Record object
-            for attr, value in vars(record).items():
-                setattr(db_record, attr, value)
+            for column in self.db_model.__table__.columns:
+                column_name = column.name
+                if hasattr(record, column_name):
+                    new_value = getattr(record, column_name)
+                    setattr(db_record, column_name, new_value)
 
-            # Commit the changes to the database
-            session.commit()
+            await session.commit()
 
     def str_to_datetime(self, str_date: str) -> datetime:
         val = str_date.split("-")
@@ -581,3 +574,179 @@ def attach_base():
     from letta.utils import printd
 
     printd("Initializing database...")
+
+
+class AsyncPostgresStorageConnector(StorageConnector):
+    """Async storage via Postgres"""
+
+    def __init__(self, table_type: str, config: LettaConfig, user_id, agent_id=None):
+        from pgvector.sqlalchemy import Vector
+
+        super().__init__(table_type=table_type, config=config, user_id=user_id, agent_id=agent_id)
+
+        # construct URI from environment variables
+        if settings.pg_uri:
+            self.uri = settings.pg_uri.replace('postgresql://', 'postgresql+asyncpg://')
+
+        # use config URI
+        # TODO: remove this eventually (config should NOT contain URI)
+        if table_type == TableType.ARCHIVAL_MEMORY or table_type == TableType.PASSAGES:
+            self.uri = self.config.archival_storage_uri.replace('postgresql://', 'postgresql+asyncpg://')
+            self.db_model = PassageModel
+            if self.config.archival_storage_uri is None:
+                raise ValueError(f"Must specify archival_storage_uri in config {self.config.config_path}")
+        elif table_type == TableType.RECALL_MEMORY:
+            self.uri = self.config.recall_storage_uri.replace('postgresql://', 'postgresql+asyncpg://')
+            self.db_model = MessageModel
+            if self.config.recall_storage_uri is None:
+                raise ValueError(f"Must specify recall_storage_uri in config {self.config.config_path}")
+        elif table_type == TableType.FILES:
+            self.uri = self.config.metadata_storage_uri.replace('postgresql://', 'postgresql+asyncpg://')
+            self.db_model = FileMetadataModel
+            if self.config.metadata_storage_uri is None:
+                raise ValueError(f"Must specify metadata_storage_uri in config {self.config.config_path}")
+        else:
+            raise ValueError(f"Table type {table_type} not implemented")
+
+        for c in self.db_model.__table__.columns:
+            if c.name == "embedding":
+                assert isinstance(c.type, Vector), f"Embedding column must be of type Vector, got {c.type}"
+
+        # Create async engine and session
+        self.engine = create_async_engine(self.uri)
+        self.async_session = sessionmaker(
+            self.engine, class_=AsyncSession, expire_on_commit=False
+        )
+
+    async def get_filters(self, filters: Optional[Dict] = {}) -> list:
+        if filters is not None:
+            filter_conditions = {**self.filters, **filters}
+        else:
+            filter_conditions = self.filters
+        all_filters = [getattr(self.db_model, key) == value for key, value in filter_conditions.items()]
+        return all_filters
+
+    async def get_all_paginated(self, filters: Optional[Dict] = {}, page_size: Optional[int] = 1000, offset=0) -> AsyncIterator[List[BaseModel]]:
+        filters = await self.get_filters(filters)
+        while True:
+            async with self.async_session() as session:
+                # Retrieve a chunk of records with the given page_size
+                db_record_chunk = await session.execute(
+                    self.db_model.__table__.select()
+                    .filter(*filters)
+                    .offset(offset)
+                    .limit(page_size)
+                )
+                db_record_chunk = db_record_chunk.scalars().all()
+
+            # If the chunk is empty, we've retrieved all records
+            if not db_record_chunk:
+                break
+
+            # Yield a list of Record objects converted from the chunk
+            yield [record.to_record() for record in db_record_chunk]
+
+            # Increment the offset to get the next chunk in the next iteration
+            offset += page_size
+
+    async def get_all(self, filters: Optional[Dict] = {}, limit=None) -> List[BaseModel]:
+        filters = await self.get_filters(filters)
+        async with self.async_session() as session:
+            if limit:
+                query = await session.execute(
+                    self.db_model.__table__.select()
+                    .filter(*filters)
+                    .limit(limit)
+                )
+            else:
+                query = await session.execute(
+                    self.db_model.__table__.select()
+                    .filter(*filters)
+                )
+            db_records = query.scalars().all()
+            return [record.to_record() for record in db_records]
+
+    async def get(self, id: str) -> Optional[BaseModel]:
+        async with self.async_session() as session:
+            db_record = await session.get(self.db_model, id)
+            if db_record is None:
+                return None
+            return db_record.to_record()
+
+    async def size(self, filters: Optional[Dict] = {}) -> int:
+        filters = await self.get_filters(filters)
+        async with self.async_session() as session:
+            result = await session.execute(
+                func.count().select().filter(*filters)
+            )
+            return result.scalar()
+
+    async def insert(self, record: BaseModel):
+        await self.insert_many([record])
+
+    async def insert_many(self, records: List[BaseModel], show_progress=False):
+        async with self.async_session() as session:
+            async with session.begin():
+                for record in records:
+                    db_record = self.db_model(**record.model_dump())
+                    session.add(db_record)
+
+    async def query(self, query: str, query_vec: List[float], top_k: int = 10, filters: Optional[Dict] = {}) -> List[BaseModel]:
+        filters = await self.get_filters(filters)
+        async with self.async_session() as session:
+            result = await session.execute(
+                self.db_model.__table__.select()
+                .filter(*filters)
+                .order_by(self.db_model.embedding.cosine_distance(query_vec))
+                .limit(top_k)
+            )
+            return [record.to_record() for record in result.scalars().all()]
+
+    async def query_date(self, start_date, end_date) -> List[BaseModel]:
+        filters = await self.get_filters({})
+        _start_date = self.str_to_datetime(start_date) if isinstance(start_date, str) else start_date
+        _end_date = self.str_to_datetime(end_date) if isinstance(end_date, str) else end_date
+        
+        async with self.async_session() as session:
+            result = await session.execute(
+                self.db_model.__table__.select()
+                .filter(*filters)
+                .filter(self.db_model.created_at >= _start_date)
+                .filter(self.db_model.created_at <= _end_date)
+                .filter(self.db_model.role != "system")
+                .filter(self.db_model.role != "tool")
+            )
+            return [record.to_record() for record in result.scalars().all()]
+
+    async def query_text(self, query: str) -> List[BaseModel]:
+        filters = await self.get_filters({})
+        async with self.async_session() as session:
+            result = await session.execute(
+                self.db_model.__table__.select()
+                .filter(*filters)
+                .filter(func.lower(self.db_model.text).contains(func.lower(query)))
+                .filter(self.db_model.role != "system")
+                .filter(self.db_model.role != "tool")
+            )
+            return [record.to_record() for record in result.scalars().all()]
+
+    async def delete_table(self):
+        async with self.engine.begin() as conn:
+            await conn.execute(text(f"DROP TABLE IF EXISTS {self.table_name}"))
+
+    async def delete(self, filters: Optional[Dict] = {}):
+        filters = await self.get_filters(filters)
+        async with self.async_session() as session:
+            async with session.begin():
+                await session.execute(
+                    self.db_model.__table__.delete().filter(*filters)
+                )
+
+    async def save(self):
+        # Commits are handled by the session context managers
+        pass
+
+    def str_to_datetime(self, str_date: str) -> datetime:
+        val = str_date.split("-")
+        _datetime = datetime(int(val[0]), int(val[1]), int(val[2]))
+        return _datetime

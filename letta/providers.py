@@ -13,18 +13,25 @@ from letta.schemas.llm_config import LLMConfig
 
 
 class Provider(BaseModel):
+    """Base class for LLM providers"""
+    name: str
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
 
     def list_llm_models(self) -> List[LLMConfig]:
-        return []
-
-    def list_embedding_models(self) -> List[EmbeddingConfig]:
-        return []
-
-    def get_model_context_window(self, model_name: str) -> Optional[int]:
+        """List available LLM models"""
         raise NotImplementedError
 
-    def provider_tag(self) -> str:
-        """String representation of the provider for display purposes"""
+    def list_embedding_models(self) -> List[EmbeddingConfig]:
+        """List available embedding models"""
+        raise NotImplementedError
+
+    async def alist_llm_models(self) -> List[LLMConfig]:
+        """List available LLM models asynchronously"""
+        raise NotImplementedError
+
+    async def alist_embedding_models(self) -> List[EmbeddingConfig]:
+        """List available embedding models asynchronously"""
         raise NotImplementedError
 
 
@@ -93,9 +100,54 @@ class OpenAIProvider(Provider):
 
         return configs
 
-    def list_embedding_models(self) -> List[EmbeddingConfig]:
+    async def alist_llm_models(self) -> List[LLMConfig]:
+        from letta.llm_api.openai import openai_get_model_list_async
 
+        # Some hardcoded support for OpenRouter (so that we only get models with tool calling support)...
+        # See: https://openrouter.ai/docs/requests
+        extra_params = {"supported_parameters": "tools"} if "openrouter.ai" in self.base_url else None
+        response = await openai_get_model_list_async(self.base_url, api_key=self.api_key, extra_params=extra_params)
+
+        assert "data" in response, f"OpenAI model query response missing 'data' field: {response}"
+
+        configs = []
+        for model in response["data"]:
+            assert "id" in model, f"OpenAI model missing 'id' field: {model}"
+            model_name = model["id"]
+
+            if "context_length" in model:
+                # Context length is returned in OpenRouter as "context_length"
+                context_window_size = model["context_length"]
+            else:
+                context_window_size = self.get_model_context_window_size(model_name)
+
+            if not context_window_size:
+                continue
+            configs.append(
+                LLMConfig(model=model_name, model_endpoint_type="openai", model_endpoint=self.base_url, context_window=context_window_size)
+            )
+
+        # for OpenAI, sort in reverse order
+        if self.base_url == "https://api.openai.com/v1":
+            # alphnumeric sort
+            configs.sort(key=lambda x: x.model, reverse=True)
+
+        return configs
+
+    def list_embedding_models(self) -> List[EmbeddingConfig]:
         # TODO: actually automatically list models
+        return [
+            EmbeddingConfig(
+                embedding_model="text-embedding-ada-002",
+                embedding_endpoint_type="openai",
+                embedding_endpoint="https://api.openai.com/v1",
+                embedding_dim=1536,
+                embedding_chunk_size=300,
+            )
+        ]
+
+    async def alist_embedding_models(self) -> List[EmbeddingConfig]:
+        # TODO: actually automatically list models asynchronously
         return [
             EmbeddingConfig(
                 embedding_model="text-embedding-ada-002",
@@ -135,7 +187,27 @@ class AnthropicProvider(Provider):
             )
         return configs
 
+    async def alist_llm_models(self) -> List[LLMConfig]:
+        from letta.llm_api.anthropic import anthropic_get_model_list_async
+
+        models = await anthropic_get_model_list_async(self.base_url, api_key=self.api_key)
+
+        configs = []
+        for model in models:
+            configs.append(
+                LLMConfig(
+                    model=model["name"],
+                    model_endpoint_type="anthropic",
+                    model_endpoint=self.base_url,
+                    context_window=model["context_window"],
+                )
+            )
+        return configs
+
     def list_embedding_models(self) -> List[EmbeddingConfig]:
+        return []
+
+    async def alist_embedding_models(self) -> List[EmbeddingConfig]:
         return []
 
 

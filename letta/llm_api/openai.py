@@ -1,6 +1,6 @@
 import json
 import warnings
-from typing import Generator, List, Optional, Union
+from typing import Generator, List, Optional, Union, Dict
 
 import httpx
 import requests
@@ -50,61 +50,68 @@ from letta.utils import get_tool_call_id, smart_urljoin
 OPENAI_SSE_DONE = "[DONE]"
 
 
-def openai_get_model_list(
-    url: str, api_key: Union[str, None], fix_url: Optional[bool] = False, extra_params: Optional[dict] = None
-) -> dict:
-    """https://platform.openai.com/docs/api-reference/models/list"""
-    from letta.utils import printd
+async def openai_get_model_list_async(url: str, api_key: Union[str, None], extra_params: Optional[Dict] = None) -> Dict:
+    """Get list of available models from OpenAI API asynchronously"""
+    headers = {"Authorization": f"Bearer {api_key}"}
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            smart_urljoin(url, "models"),
+            headers=headers,
+            params=extra_params,
+        )
+        response.raise_for_status()
+        return response.json()
 
-    # In some cases we may want to double-check the URL and do basic correction, eg:
-    # In Letta config the address for vLLM is w/o a /v1 suffix for simplicity
-    # However if we're treating the server as an OpenAI proxy we want the /v1 suffix on our model hit
-    if fix_url:
-        if not url.endswith("/v1"):
-            url = smart_urljoin(url, "v1")
 
-    url = smart_urljoin(url, "models")
+def openai_get_model_list(url: str, api_key: Union[str, None], extra_params: Optional[Dict] = None) -> Dict:
+    """Get list of available models from OpenAI API"""
+    headers = {"Authorization": f"Bearer {api_key}"}
+    response = httpx.get(
+        smart_urljoin(url, "models"),
+        headers=headers,
+        params=extra_params,
+    )
+    response.raise_for_status()
+    return response.json()
 
-    headers = {"Content-Type": "application/json"}
-    if api_key is not None:
-        headers["Authorization"] = f"Bearer {api_key}"
 
-    printd(f"Sending request to {url}")
-    response = None
-    try:
-        # TODO add query param "tool" to be true
-        response = requests.get(url, headers=headers, params=extra_params)
-        response.raise_for_status()  # Raises HTTPError for 4XX/5XX status
-        response = response.json()  # convert to dict from string
-        printd(f"response = {response}")
-        return response
-    except requests.exceptions.HTTPError as http_err:
-        # Handle HTTP errors (e.g., response 4XX, 5XX)
-        try:
-            if response:
-                response = response.json()
-        except:
-            pass
-        printd(f"Got HTTPError, exception={http_err}, response={response}")
-        raise http_err
-    except requests.exceptions.RequestException as req_err:
-        # Handle other requests-related errors (e.g., connection error)
-        try:
-            if response:
-                response = response.json()
-        except:
-            pass
-        printd(f"Got RequestException, exception={req_err}, response={response}")
-        raise req_err
-    except Exception as e:
-        # Handle other potential errors
-        try:
-            if response:
-                response = response.json()
-        except:
-            pass
-        printd(f"Got unknown Exception, exception={e}, response={response}")
-        raise e
+async def openai_get_embedding_async(text: str, model: str, url: str, api_key: str) -> List[float]:
+    """Get embedding from OpenAI API asynchronously"""
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    data = {
+        "input": text,
+        "model": model,
+    }
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            smart_urljoin(url, "embeddings"),
+            headers=headers,
+            json=data,
+        )
+        response.raise_for_status()
+        return response.json()["data"][0]["embedding"]
+
+
+def openai_get_embedding(text: str, model: str, url: str, api_key: str) -> List[float]:
+    """Get embedding from OpenAI API"""
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    data = {
+        "input": text,
+        "model": model,
+    }
+    response = httpx.post(
+        smart_urljoin(url, "embeddings"),
+        headers=headers,
+        json=data,
+    )
+    response.raise_for_status()
+    return response.json()["data"][0]["embedding"]
 
 
 def build_openai_chat_completions_request(
@@ -497,52 +504,28 @@ def openai_chat_completions_request_stream(
         raise e
 
 
-def openai_chat_completions_request(
+async def openai_chat_completions_request(
     url: str,
     api_key: str,
     chat_completion_request: ChatCompletionRequest,
 ) -> ChatCompletionResponse:
-    """Send a ChatCompletion request to an OpenAI-compatible server
-
-    If request.stream == True, will yield ChatCompletionChunkResponses
-    If request.stream == False, will return a ChatCompletionResponse
-
-    https://platform.openai.com/docs/guides/text-generation?lang=curl
-    """
-    from letta.utils import printd
-
     url = smart_urljoin(url, "chat/completions")
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     data = chat_completion_request.model_dump(exclude_none=True)
 
-    # add check otherwise will cause error: "Invalid value for 'parallel_tool_calls': 'parallel_tool_calls' is only allowed when 'tools' are specified."
-    if chat_completion_request.tools is not None:
-        data["parallel_tool_calls"] = False
-
-    printd("Request:\n", json.dumps(data, indent=2))
-
-    # If functions == None, strip from the payload
-    if "functions" in data and data["functions"] is None:
-        data.pop("functions")
-        data.pop("function_call", None)  # extra safe,  should exist always (default="auto")
-
-    if "tools" in data and data["tools"] is None:
-        data.pop("tools")
-        data.pop("tool_choice", None)  # extra safe,  should exist always (default="auto")
-
-    if "tools" in data:
-        for tool in data["tools"]:
-            tool["function"] = convert_to_structured_output(tool["function"])
-
-    response_json = make_post_request(url, headers, data)
-
-    return ChatCompletionResponse(**response_json)
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, json=data, headers=headers)
+        response.raise_for_status()
+        response_json = response.json()
+        return ChatCompletionResponse(**response_json)
 
 
-def openai_embeddings_request(url: str, api_key: str, data: dict) -> EmbeddingResponse:
-    """https://platform.openai.com/docs/api-reference/embeddings/create"""
-
+async def openai_embeddings_request(url: str, api_key: str, data: dict) -> EmbeddingResponse:
     url = smart_urljoin(url, "embeddings")
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-    response_json = make_post_request(url, headers, data)
-    return EmbeddingResponse(**response_json)
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, json=data, headers=headers)
+        response.raise_for_status()
+        response_json = response.json()
+        return EmbeddingResponse(**response_json)

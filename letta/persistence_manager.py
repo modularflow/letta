@@ -19,23 +19,23 @@ def parse_formatted_time(formatted_time: str):
 
 class PersistenceManager(ABC):
     @abstractmethod
-    def trim_messages(self, num):
+    async def trim_messages(self, num):
         pass
 
     @abstractmethod
-    def prepend_to_messages(self, added_messages):
+    async def prepend_to_messages(self, added_messages):
         pass
 
     @abstractmethod
-    def append_to_messages(self, added_messages):
+    async def append_to_messages(self, added_messages):
         pass
 
     @abstractmethod
-    def swap_system_message(self, new_system_message):
+    async def swap_system_message(self, new_system_message):
         pass
 
     @abstractmethod
-    def update_memory(self, new_memory):
+    async def update_memory(self, new_memory):
         pass
 
 
@@ -108,12 +108,12 @@ class LocalStateManager(PersistenceManager):
         )
     '''
 
-    def trim_messages(self, num):
+    async def trim_messages(self, num):
         # printd(f"InMemoryStateManager.trim_messages")
         # self.messages = [self.messages[0]] + self.messages[num:]
         pass
 
-    def prepend_to_messages(self, added_messages: List[Message]):
+    async def prepend_to_messages(self, added_messages: List[Message]):
         # first tag with timestamps
         # added_messages = [{"timestamp": get_local_time(), "message": msg} for msg in added_messages]
 
@@ -122,7 +122,7 @@ class LocalStateManager(PersistenceManager):
 
         # add to recall memory
 
-    def append_to_messages(self, added_messages: List[Message]):
+    async def append_to_messages(self, added_messages: List[Message]):
         # first tag with timestamps
         # added_messages = [{"timestamp": get_local_time(), "message": msg} for msg in added_messages]
 
@@ -130,9 +130,9 @@ class LocalStateManager(PersistenceManager):
         # self.messages = self.messages + added_messages
 
         # add to recall memory
-        self.recall_memory.insert_many([m for m in added_messages])
+        await self.recall_memory.insert_many([m for m in added_messages])
 
-    def swap_system_message(self, new_system_message: Message):
+    async def swap_system_message(self, new_system_message: Message):
         # first tag with timestamps
         # new_system_message = {"timestamp": get_local_time(), "message": new_system_message}
 
@@ -140,9 +140,9 @@ class LocalStateManager(PersistenceManager):
         # self.messages[0] = new_system_message
 
         # add to recall memory
-        self.recall_memory.insert(new_system_message)
+        await self.recall_memory.insert(new_system_message)
 
-    def update_memory(self, new_memory: Memory):
+    async def update_memory(self, new_memory: Memory):
         printd(f"{self.__class__.__name__}.update_memory")
         assert isinstance(new_memory, Memory), type(new_memory)
         self.memory = new_memory

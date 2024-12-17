@@ -15,6 +15,7 @@ from letta.schemas.openai.chat_completion_response import (
 )
 from letta.schemas.openai.chat_completion_response import ToolCall, UsageStatistics
 from letta.utils import get_utc_time, smart_urljoin
+import httpx
 
 BASE_URL = "https://api.anthropic.com/v1"
 
@@ -39,18 +40,32 @@ MODEL_LIST = [
 DUMMY_FIRST_USER_MESSAGE = "User initializing bootup sequence."
 
 
-def antropic_get_model_context_window(url: str, api_key: Union[str, None], model: str) -> int:
-    for model_dict in anthropic_get_model_list(url=url, api_key=api_key):
+async def anthropic_get_model_list_async(url: str, api_key: Union[str, None]) -> List[dict]:
+    """Get list of available models from Anthropic API asynchronously"""
+    # Currently returns hardcoded list since Anthropic doesn't have a models endpoint
+    return MODEL_LIST
+
+
+def anthropic_get_model_list(url: str, api_key: Union[str, None]) -> List[dict]:
+    """Get list of available models from Anthropic API"""
+    # Currently returns hardcoded list since Anthropic doesn't have a models endpoint
+    return MODEL_LIST
+
+
+async def anthropic_get_model_context_window_async(url: str, api_key: Union[str, None], model: str) -> int:
+    """Get context window size for a model from Anthropic API asynchronously"""
+    for model_dict in await anthropic_get_model_list_async(url=url, api_key=api_key):
         if model_dict["name"] == model:
             return model_dict["context_window"]
     raise ValueError(f"Can't find model '{model}' in Anthropic model list")
 
 
-def anthropic_get_model_list(url: str, api_key: Union[str, None]) -> dict:
-    """https://docs.anthropic.com/claude/docs/models-overview"""
-
-    # NOTE: currently there is no GET /models, so we need to hardcode
-    return MODEL_LIST
+def anthropic_get_model_context_window(url: str, api_key: Union[str, None], model: str) -> int:
+    """Get context window size for a model from Anthropic API"""
+    for model_dict in anthropic_get_model_list(url=url, api_key=api_key):
+        if model_dict["name"] == model:
+            return model_dict["context_window"]
+    raise ValueError(f"Can't find model '{model}' in Anthropic model list")
 
 
 def convert_tools_to_anthropic_format(tools: List[Tool]) -> List[dict]:
@@ -287,7 +302,7 @@ def convert_anthropic_response_to_chatcompletion(
     )
 
 
-def anthropic_chat_completions_request(
+async def anthropic_chat_completions_request(
     url: str,
     api_key: str,
     data: ChatCompletionRequest,
@@ -299,64 +314,17 @@ def anthropic_chat_completions_request(
     headers = {
         "Content-Type": "application/json",
         "x-api-key": api_key,
-        # NOTE: beta headers for tool calling
         "anthropic-version": "2023-06-01",
         "anthropic-beta": "tools-2024-04-04",
     }
-
-    # convert the tools
-    anthropic_tools = None if data.tools is None else convert_tools_to_anthropic_format(data.tools)
-
-    # pydantic -> dict
-    data = data.model_dump(exclude_none=True)
-
-    if "functions" in data:
-        raise ValueError(f"'functions' unexpected in Anthropic API payload")
-
-    # If tools == None, strip from the payload
-    if "tools" in data and data["tools"] is None:
-        data.pop("tools")
-        data.pop("tool_choice", None)  # extra safe,  should exist always (default="auto")
-    # Remap to our converted tools
-    if anthropic_tools is not None:
-        data["tools"] = anthropic_tools
-
-    # Move 'system' to the top level
-    # 'messages: Unexpected role "system". The Messages API accepts a top-level `system` parameter, not "system" as an input message role.'
-    assert data["messages"][0]["role"] == "system", f"Expected 'system' role in messages[0]:\n{data['messages'][0]}"
-    data["system"] = data["messages"][0]["content"]
-    data["messages"] = data["messages"][1:]
-
-    # set `content` to None if missing
-    for message in data["messages"]:
-        if "content" not in message:
-            message["content"] = None
-
-    # Convert to Anthropic format
-
-    msg_objs = [Message.dict_to_message(user_id=None, agent_id=None, openai_message_dict=m) for m in data["messages"]]
-    data["messages"] = [m.to_anthropic_dict(inner_thoughts_xml_tag=inner_thoughts_xml_tag) for m in msg_objs]
-
-    # Handling Anthropic special requirement for 'user' message in front
-    # messages: first message must use the "user" role'
-    if data["messages"][0]["role"] != "user":
-        data["messages"] = [{"role": "user", "content": DUMMY_FIRST_USER_MESSAGE}] + data["messages"]
-
-    # Handle Anthropic's restriction on alternating user/assistant messages
-    data["messages"] = merge_tool_results_into_user_messages(data["messages"])
-
-    # Anthropic also wants max_tokens in the input
-    # It's also part of ChatCompletions
-    assert "max_tokens" in data, data
-
-    # Remove extra fields used by OpenAI but not Anthropic
-    data.pop("frequency_penalty", None)
-    data.pop("logprobs", None)
-    data.pop("n", None)
-    data.pop("top_p", None)
-    data.pop("presence_penalty", None)
-    data.pop("user", None)
-    data.pop("tool_choice", None)
-
-    response_json = make_post_request(url, headers, data)
-    return convert_anthropic_response_to_chatcompletion(response_json=response_json, inner_thoughts_xml_tag=inner_thoughts_xml_tag)
+    
+    anthropic_data = convert_to_anthropic_format(data, inner_thoughts_xml_tag)
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, json=anthropic_data, headers=headers)
+        response.raise_for_status()
+        response_json = response.json()
+        return convert_anthropic_response_to_chatcompletion(
+            response_json=response_json, 
+            inner_thoughts_xml_tag=inner_thoughts_xml_tag
+        )

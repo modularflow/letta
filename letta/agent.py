@@ -515,18 +515,18 @@ class Agent(BaseAgent):
 
         self.set_message_buffer(message_ids=messages_to_sync)
 
-    def _trim_messages(self, num):
+    async def _trim_messages(self, num):
         """Trim messages from the front, not including the system message"""
-        self.persistence_manager.trim_messages(num)
+        await self.persistence_manager.trim_messages(num)
 
         new_messages = [self._messages[0]] + self._messages[num:]
         self._messages = new_messages
 
-    def _prepend_to_messages(self, added_messages: List[Message]):
+    async def _prepend_to_messages(self, added_messages: List[Message]):
         """Wrapper around self.messages.prepend to allow additional calls to a state/persistence manager"""
         assert all([isinstance(msg, Message) for msg in added_messages])
 
-        self.persistence_manager.prepend_to_messages(added_messages)
+        await self.persistence_manager.prepend_to_messages(added_messages)
 
         new_messages = [
             self._messages[0]
@@ -536,22 +536,16 @@ class Agent(BaseAgent):
             added_messages
         )  # still should increment the message counter (summaries are additions too)
 
-    def _append_to_messages(self, added_messages: List[Message]):
+    async def _append_to_messages(self, added_messages: List[Message]):
         """Wrapper around self.messages.append to allow additional calls to a state/persistence manager"""
         assert all([isinstance(msg, Message) for msg in added_messages])
 
-        self.persistence_manager.append_to_messages(added_messages)
-
-        # strip extra metadata if it exists
-        # for msg in added_messages:
-        # msg.pop("api_response", None)
-        # msg.pop("api_args", None)
-        new_messages = self._messages + added_messages  # append
-
+        await self.persistence_manager.append_to_messages(added_messages)
+        new_messages = self._messages + added_messages
         self._messages = new_messages
         self.messages_total += len(added_messages)
 
-    def append_to_messages(self, added_messages: List[dict]):
+    async def append_to_messages(self, added_messages: List[dict]):
         """An external-facing message append, where dict-like messages are first converted to Message objects"""
         added_messages_objs = [
             Message.dict_to_message(
@@ -561,9 +555,9 @@ class Agent(BaseAgent):
                 openai_message_dict=msg,
             ) for msg in added_messages
         ]
-        self._append_to_messages(added_messages_objs)
+        await self._append_to_messages(added_messages_objs)
 
-    def _get_ai_reply(
+    async def _get_ai_reply(
         self,
         message_sequence: List[Message],
         function_call: str = "auto",
@@ -586,7 +580,7 @@ class Agent(BaseAgent):
             ]
 
         try:
-            response = create(
+            response = await create(
                 # agent_state=self.agent_state,
                 llm_config=self.agent_state.llm_config,
                 messages=message_sequence,
@@ -608,7 +602,7 @@ class Agent(BaseAgent):
                 else:
                     # Decrement retry limit and try again
                     warnings.warn(empty_api_err_message)
-                    return self._get_ai_reply(message_sequence, function_call,
+                    return await self._get_ai_reply(message_sequence, function_call,
                                               first_message, stream,
                                               fail_on_empty_response,
                                               empty_response_retry_limit - 1)
@@ -630,7 +624,7 @@ class Agent(BaseAgent):
         except Exception as e:
             raise e
 
-    def _handle_ai_response(
+    async def _handle_ai_response(
         self,
         response_message:
         ChatCompletionMessage,  # TODO should we eventually move the Message creation outside of this function?
@@ -793,15 +787,22 @@ class Agent(BaseAgent):
                 msg_obj=messages[-1])
             try:
                 spec = inspect.getfullargspec(function_to_call).annotations
-
+                
                 for name, arg in function_args.items():
                     if isinstance(function_args[name], dict):
                         function_args[name] = spec[name](**function_args[name])
 
-                function_args[
-                    "self"] = self  # need to attach self to arg since it's dynamically linked
+                function_args["self"] = self
 
-                function_response = function_to_call(**function_args)
+                # Execute function asynchronously if it's async, otherwise run in executor
+                if inspect.iscoroutinefunction(function_to_call):
+                    function_response = await function_to_call(**function_args)
+                else:
+                    # Run sync functions in thread pool
+                    function_response = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: function_to_call(**function_args)
+                    )
+
                 if function_name in [
                         "conversation_search", "conversation_search_date",
                         "archival_memory_search"
@@ -881,7 +882,7 @@ class Agent(BaseAgent):
 
         # rebuild memory
         # TODO: @charles please check this
-        self.rebuild_memory()
+        await self.rebuild_memory()
 
         # Update ToolRulesSolver state with last called function
         self.tool_rules_solver.update_tool_usage(function_name)
@@ -893,7 +894,7 @@ class Agent(BaseAgent):
 
         return messages, heartbeat_request, function_failed
 
-    def step(
+    async def step(
         self,
         messages: Union[Message, List[Message]],
         # additional args
@@ -913,7 +914,7 @@ class Agent(BaseAgent):
         while True:
             kwargs["ms"] = ms
             kwargs["first_message"] = False
-            step_response = self.inner_step(
+            step_response = await self.inner_step(
                 messages=next_input_message,
                 **kwargs,
             )
@@ -931,7 +932,7 @@ class Agent(BaseAgent):
             # logger.debug("Saving agent state")
             # save updated state
             if ms:
-                save_agent(self, ms)
+                await save_agent(self, ms)
 
             # Chain stops
             if not chaining:
@@ -986,7 +987,7 @@ class Agent(BaseAgent):
         return LettaUsageStatistics(**total_usage.model_dump(),
                                     step_count=step_count)
 
-    def inner_step(
+    async def inner_step(
         self,
         messages: Union[Message, List[Message]],
         first_message: bool = False,
@@ -1012,7 +1013,7 @@ class Agent(BaseAgent):
                     # TODO: the force=True can be optimized away
                     # once we ensure we're correctly comparing whether in-memory core
                     # data is different than persisted core data.
-                    self.rebuild_memory(force=True, ms=ms)
+                    await self.rebuild_memory(force=True, ms=ms)
 
             # Step 1: add user message
             if isinstance(messages, Message):
@@ -1039,7 +1040,7 @@ class Agent(BaseAgent):
                 )
                 counter = 0
                 while True:
-                    response = self._get_ai_reply(
+                    response = await self._get_ai_reply(
                         message_sequence=input_message_sequence,
                         first_message=True,
                         stream=stream  # passed through to the prompt formatter
@@ -1056,7 +1057,7 @@ class Agent(BaseAgent):
                         )
 
             else:
-                response = self._get_ai_reply(
+                response = await self._get_ai_reply(
                     message_sequence=input_message_sequence,
                     stream=stream,
                 )
@@ -1066,7 +1067,7 @@ class Agent(BaseAgent):
             # (if yes) Step 5: send the info on the function call and function response to LLM
             response_message = response.choices[0].message
             response_message.model_copy()  # TODO why are we copying here?
-            all_response_messages, heartbeat_request, function_failed = self._handle_ai_response(
+            all_response_messages, heartbeat_request, function_failed = await self._handle_ai_response(
                 response_message,
                 # TODO this is kind of hacky, find a better way to handle this
                 # the only time we set up message creation ahead of time is when streaming is on
@@ -1111,10 +1112,10 @@ class Agent(BaseAgent):
                     f"last response total_tokens ({current_total_tokens}) < {MESSAGE_SUMMARY_WARNING_FRAC * int(self.agent_state.llm_config.context_window)}"
                 )
 
-            self._append_to_messages(all_new_messages)
+            await self._append_to_messages(all_new_messages)
 
             # update state after each step
-            self.update_state()
+            await self.update_state()
 
             return AgentStepResponse(
                 messages=all_new_messages,
@@ -1130,10 +1131,10 @@ class Agent(BaseAgent):
             # If we got a context alert, try trimming the messages length, then try again
             if is_context_overflow_error(e):
                 # A separate API call to run a summarizer
-                self.summarize_messages_inplace()
+                await self.summarize_messages_inplace()
 
                 # Try step again
-                return self.inner_step(
+                return await self.inner_step(
                     messages=messages,
                     first_message=first_message,
                     first_message_retry_limit=first_message_retry_limit,
@@ -1148,7 +1149,7 @@ class Agent(BaseAgent):
                 )
                 raise e
 
-    def step_user_message(self, user_message_str: str,
+    async def step_user_message(self, user_message_str: str,
                           **kwargs) -> AgentStepResponse:
         """Takes a basic user message string, turns it into a stringified JSON with extra metadata, then sends it to the agent
 
@@ -1186,9 +1187,9 @@ class Agent(BaseAgent):
             # created_at=timestamp,
         )
 
-        return self.inner_step(messages=[user_message], **kwargs)
+        return await self.inner_step(messages=[user_message], **kwargs)
 
-    def summarize_messages_inplace(self,
+    async def summarize_messages_inplace(self,
                                    cutoff=None,
                                    preserve_last_N_messages=True,
                                    disallow_tool_as_first=True):
@@ -1287,7 +1288,7 @@ class Agent(BaseAgent):
                 LLM_MAX_TOKENS[self.model] if
                 (self.model is not None and self.model in LLM_MAX_TOKENS) else
                 LLM_MAX_TOKENS["DEFAULT"])
-        summary = summarize_messages(
+        summary = await summarize_messages(
             agent_state=self.agent_state,
             message_sequence_to_summarize=message_sequence_to_summarize)
         printd(f"Got summary: {summary}")
@@ -1304,9 +1305,9 @@ class Agent(BaseAgent):
         printd(f"Packaged into message: {summary_message}")
 
         prior_len = len(self.messages)
-        self._trim_messages(cutoff)
+        await self._trim_messages(cutoff)
         packed_summary_message = {"role": "user", "content": summary_message}
-        self._prepend_to_messages([
+        await self._prepend_to_messages([
             Message.dict_to_message(
                 agent_id=self.agent_state.id,
                 user_id=self.agent_state.user_id,
@@ -1334,7 +1335,7 @@ class Agent(BaseAgent):
         return elapsed_time.total_seconds(
         ) < self.pause_heartbeats_minutes * 60
 
-    def _swap_system_message_in_buffer(self, new_system_message: str):
+    async def _swap_system_message_in_buffer(self, new_system_message: str):
         """Update the system message (NOT prompt) of the Agent (requires updating the internal buffer)"""
         assert isinstance(new_system_message, str)
         new_system_message_obj = Message.dict_to_message(
@@ -1350,13 +1351,13 @@ class Agent(BaseAgent):
         assert new_system_message_obj.role == "system", new_system_message_obj
         assert self._messages[0].role == "system", self._messages
 
-        self.persistence_manager.swap_system_message(new_system_message_obj)
+        await self.persistence_manager.swap_system_message(new_system_message_obj)
 
         new_messages = [new_system_message_obj
                         ] + self._messages[1:]  # swap index 0 (system)
         self._messages = new_messages
 
-    def rebuild_memory(self,
+    async def rebuild_memory(self,
                        force=False,
                        update_timestamp=True,
                        ms: Optional[MetadataStore] = None):
@@ -1379,7 +1380,7 @@ class Agent(BaseAgent):
                     # future if we expect templates to change often.
                     continue
                 block_id = block.get("id")
-                db_block = ms.get_block(block_id=block_id)
+                db_block = await ms.get_block(block_id=block_id)
                 if db_block is None:
                     # this case covers if someone has deleted a shared block by interacting
                     # with some other agent.
@@ -1425,7 +1426,7 @@ class Agent(BaseAgent):
             printd(f"Rebuilding system with new memory...\nDiff:\n{diff}")
 
             # Swap the system message out (only if there is a diff)
-            self._swap_system_message_in_buffer(
+            await self._swap_system_message_in_buffer(
                 new_system_message=new_system_message_str)
             assert self.messages[0]["content"] == new_system_message[
                 "content"], (
@@ -1457,18 +1458,15 @@ class Agent(BaseAgent):
         # TODO: refactor
         raise NotImplementedError
 
-    def update_state(self) -> AgentState:
-        message_ids = [msg.id for msg in self._messages]
-        assert isinstance(
-            self.memory,
-            Memory), f"Memory is not a Memory object: {type(self.memory)}"
+async def update_state(self) -> AgentState:
+    message_ids = [msg.id for msg in self._messages]
+    assert isinstance(self.memory, Memory), f"Memory is not a Memory object: {type(self.memory)}"
 
-        # override any fields that may have been updated
-        self.agent_state.message_ids = message_ids
-        self.agent_state.memory = self.memory
-        self.agent_state.system = self.system
+    self.agent_state.message_ids = message_ids
+    self.agent_state.memory = self.memory
+    self.agent_state.system = self.system
 
-        return self.agent_state
+    return self.agent_state
 
     def migrate_embedding(self, embedding_config: EmbeddingConfig):
         """Migrate the agent to a new embedding"""

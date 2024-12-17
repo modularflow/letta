@@ -3,6 +3,9 @@ import time
 from typing import Callable, Dict, Generator, List, Optional, Union
 
 import requests
+import asyncio
+import uuid
+import httpx
 
 import letta.utils
 from letta.constants import ADMIN_PREFIX, BASE_TOOLS, DEFAULT_HUMAN, DEFAULT_PERSONA
@@ -47,6 +50,7 @@ from letta.schemas.tool_rule import BaseToolRule
 from letta.server.rest_api.interface import QueuingInterface
 from letta.server.server import SyncServer
 from letta.utils import get_human_text, get_persona_text
+from letta.utils.http_client import make_async_request, make_async_post_request, make_async_delete_request
 
 
 def create_client(base_url: Optional[str] = None, token: Optional[str] = None):
@@ -299,6 +303,18 @@ class AbstractClient(object):
     def delete_org(self, org_id: str) -> Organization:
         raise NotImplementedError
 
+    async def load_file_to_source(self, filename: str, source_id: str, blocking=True) -> Job:
+        raise NotImplementedError
+
+    async def delete_file_from_source(self, source_id: str, file_id: str) -> None:
+        raise NotImplementedError
+
+    async def create_source(self, name: str) -> Source:
+        raise NotImplementedError
+
+    async def list_attached_sources(self, agent_id: str) -> List[Source]:
+        raise NotImplementedError
+
 
 class RESTClient(AbstractClient):
     """
@@ -333,6 +349,154 @@ class RESTClient(AbstractClient):
         self.headers = {"accept": "application/json", "authorization": f"Bearer {token}"}
         self._default_llm_config = default_llm_config
         self._default_embedding_config = default_embedding_config
+        self._async_client = httpx.AsyncClient()
+
+    async def aclose(self):
+        """Close the async client session"""
+        await self._async_client.aclose()
+
+    async def aget_agent(self, agent_id: str) -> AgentState:
+        """Async version of get_agent"""
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/agents/{agent_id}",
+            headers=self.headers
+        )
+        return AgentState(**response)
+
+    async def alist_agents(self, tags: Optional[List[str]] = None) -> List[AgentState]:
+        """Async version of list_agents"""
+        params = {"tags": tags} if tags else {}
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/agents",
+            headers=self.headers,
+            params=params
+        )
+        return [AgentState(**agent) for agent in response]
+
+    async def acreate_agent(
+        self,
+        name: Optional[str] = None,
+        agent_type: Optional[AgentType] = AgentType.memgpt_agent,
+        embedding_config: Optional[EmbeddingConfig] = None,
+        llm_config: Optional[LLMConfig] = None,
+        memory: Memory = ChatMemory(human=get_human_text(DEFAULT_HUMAN), persona=get_persona_text(DEFAULT_PERSONA)),
+        system: Optional[str] = None,
+        tools: Optional[List[str]] = None,
+        tool_rules: Optional[List[BaseToolRule]] = None,
+        include_base_tools: Optional[bool] = True,
+        metadata: Optional[Dict] = {"human:": DEFAULT_HUMAN, "persona": DEFAULT_PERSONA},
+        description: Optional[str] = None,
+        initial_message_sequence: Optional[List[Message]] = None,
+    ) -> AgentState:
+        """Async version of create_agent"""
+        tool_names = []
+        if tools:
+            tool_names += tools
+        if include_base_tools:
+            tool_names += BASE_TOOLS
+
+        memory_functions = get_memory_functions(memory)
+        for func_name, func in memory_functions.items():
+            tool = await self.acreate_tool(func, name=func_name, tags=["memory", "letta-base"])
+            tool_names.append(tool.name)
+
+        assert embedding_config or self._default_embedding_config, "Embedding config must be provided"
+        assert llm_config or self._default_llm_config, "LLM config must be provided"
+
+        request = CreateAgent(
+            name=name,
+            description=description,
+            metadata_=metadata,
+            memory=memory,
+            tools=tool_names,
+            tool_rules=tool_rules,
+            system=system,
+            agent_type=agent_type,
+            llm_config=llm_config if llm_config else self._default_llm_config,
+            embedding_config=embedding_config if embedding_config else self._default_embedding_config,
+            initial_message_sequence=initial_message_sequence,
+        )
+
+        response = await make_async_post_request(
+            f"{self.base_url}/{self.api_prefix}/agents",
+            headers=self.headers,
+            json_data=request.model_dump()
+        )
+        return AgentState(**response)
+
+    async def asend_message(
+        self,
+        message: str,
+        role: str,
+        agent_id: Optional[str] = None,
+        name: Optional[str] = None,
+        stream: Optional[bool] = False,
+        stream_steps: bool = False,
+        stream_tokens: bool = False,
+        include_full_message: Optional[bool] = False,
+    ) -> LettaResponse:
+        """Async version of send_message"""
+        messages = [MessageCreate(role=MessageRole(role), text=message, name=name)]
+        request = LettaRequest(
+            messages=messages,
+            stream_steps=stream_steps,
+            stream_tokens=stream_tokens,
+            return_message_object=include_full_message,
+        )
+
+        if stream_tokens or stream_steps:
+            # TODO: Implement streaming
+            raise NotImplementedError("Streaming not yet implemented for async client")
+        
+        response = await make_async_post_request(
+            f"{self.base_url}/{self.api_prefix}/agents/{agent_id}/messages",
+            headers=self.headers,
+            json_data=request.model_dump()
+        )
+        return LettaResponse(**response)
+
+    async def acreate_tool(
+        self,
+        func: Callable,
+        name: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+    ) -> Tool:
+        """Async version of create_tool"""
+        source_code = parse_source_code(func)
+        source_type = "python"
+
+        request = ToolCreate(source_type=source_type, source_code=source_code, name=name, tags=tags)
+        response = await make_async_post_request(
+            f"{self.base_url}/{self.api_prefix}/tools",
+            headers=self.headers,
+            json_data=request.model_dump()
+        )
+        return Tool(**response)
+
+    async def alist_tools(self, cursor: Optional[str] = None, limit: Optional[int] = 50) -> List[Tool]:
+        """Async version of list_tools"""
+        params = {}
+        if cursor:
+            params["cursor"] = str(cursor)
+        if limit:
+            params["limit"] = limit
+
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/tools",
+            headers=self.headers,
+            params=params
+        )
+        return [Tool(**tool) for tool in response]
+
+    async def adelete_tool(self, name: str):
+        """Async version of delete_tool"""
+        await make_async_delete_request(
+            f"{self.base_url}/{self.api_prefix}/tools/{name}",
+            headers=self.headers
+        )
 
     def list_agents(self, tags: Optional[List[str]] = None) -> List[AgentState]:
         params = {}
@@ -1152,9 +1316,9 @@ class RESTClient(AbstractClient):
     def load_data(self, connector: DataConnector, source_name: str):
         raise NotImplementedError
 
-    def load_file_to_source(self, filename: str, source_id: str, blocking=True):
+    async def load_file_to_source(self, filename: str, source_id: str, blocking=True) -> Job:
         """
-        Load a file into a source
+        Load a file into a source asynchronously
 
         Args:
             filename (str): Name of the file
@@ -1164,24 +1328,53 @@ class RESTClient(AbstractClient):
         Returns:
             job (Job): Data loading job including job status and metadata
         """
+        # TODO: Implement file upload using http_client
         files = {"file": open(filename, "rb")}
-
-        # create job
-        response = requests.post(f"{self.base_url}/{self.api_prefix}/sources/{source_id}/upload", files=files, headers=self.headers)
-        if response.status_code != 200:
-            raise ValueError(f"Failed to upload file to source: {response.text}")
-
-        job = Job(**response.json())
+        
+        response = await make_async_request(
+            "POST",
+            f"{self.base_url}/{self.api_prefix}/sources/{source_id}/upload",
+            headers=self.headers,
+            files=files
+        )
+        
+        job = Job(**response)
+        
         if blocking:
-            # wait until job is completed
             while True:
-                job = self.get_job(job.id)
+                job = await self.get_job(job.id)
                 if job.status == JobStatus.completed:
                     break
                 elif job.status == JobStatus.failed:
                     raise ValueError(f"Job failed: {job.metadata}")
-                time.sleep(1)
+                await asyncio.sleep(1)
         return job
+
+    async def delete_file_from_source(self, source_id: str, file_id: str) -> None:
+        await make_async_request(
+            "DELETE",
+            f"{self.base_url}/{self.api_prefix}/sources/{source_id}/{file_id}",
+            headers=self.headers
+        )
+
+    async def create_source(self, name: str) -> Source:
+        """Create a source asynchronously"""
+        payload = {"name": name}
+        response = await make_async_post_request(
+            f"{self.base_url}/{self.api_prefix}/sources",
+            headers=self.headers,
+            json_data=payload
+        )
+        return Source(**response)
+
+    async def list_attached_sources(self, agent_id: str) -> List[Source]:
+        """List sources attached to an agent asynchronously"""
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/agents/{agent_id}/sources",
+            headers=self.headers
+        )
+        return [Source(**source) for source in response]
 
     def delete_file_from_source(self, source_id: str, file_id: str) -> None:
         response = requests.delete(f"{self.base_url}/{self.api_prefix}/sources/{source_id}/{file_id}", headers=self.headers)
@@ -1272,7 +1465,7 @@ class RESTClient(AbstractClient):
         response = requests.post(f"{self.base_url}/{self.api_prefix}/sources/{source_id}/attach", params=params, headers=self.headers)
         assert response.status_code == 200, f"Failed to attach source to agent: {response.text}"
 
-    def detach_source(self, source_id: str, agent_id: str):
+    def detach_source_from_agent(self, source_id: str, agent_id: str):
         """Detach a source from an agent"""
         params = {"agent_id": str(agent_id)}
         response = requests.post(f"{self.base_url}/{self.api_prefix}/sources/{source_id}/detach", params=params, headers=self.headers)
@@ -1563,6 +1756,325 @@ class RESTClient(AbstractClient):
         # Parse and return the deleted organization
         return Organization(**response.json())
 
+    async def load_file_to_source(self, filename: str, source_id: str, blocking=True) -> Job:
+        """Load a file into a source locally"""
+        job_id = str(uuid.uuid4())
+        job = Job(
+            id=job_id,
+            status=JobStatus.created,
+            metadata_={
+                "type": "embedding",
+                "filename": filename,
+                "source_id": source_id
+            }
+        )
+        
+        if blocking:
+            await self.server.load_file_to_source(source_id, filename, job_id)
+        else:
+            asyncio.create_task(self.server.load_file_to_source(source_id, filename, job_id))
+            
+        return job
+
+    async def list_jobs(self) -> List[Job]:
+        """List all jobs"""
+        return await self.server.list_jobs()
+
+    async def list_active_jobs(self) -> List[Job]:
+        """List active jobs"""
+        return await self.server.list_active_jobs()
+
+    async def get_job(self, job_id: str) -> Job:
+        """Get a job by ID"""
+        return await self.server.get_job(job_id)
+
+    async def delete_job(self, job_id: str) -> None:
+        """Delete a job"""
+        await self.server.delete_job(job_id)
+
+    async def create_source(self, name: str) -> Source:
+        """Create a new source"""
+        return await self.server.create_source(name)
+
+    async def get_source(self, source_id: str) -> Source:
+        """Get a source by ID"""
+        return await self.server.get_source(source_id)
+
+    async def list_sources(self) -> List[Source]:
+        """List all sources"""
+        return await self.server.list_all_sources()
+
+    async def update_source(self, source_id: str, name: Optional[str] = None) -> Source:
+        """Update a source"""
+        return await self.server.update_source(source_id, name)
+
+    async def delete_source(self, source_id: str) -> None:
+        """Delete a source"""
+        await self.server.delete_source(source_id)
+
+    async def attach_source_to_agent(
+        self, 
+        agent_id: str, 
+        source_id: Optional[str] = None,
+        source_name: Optional[str] = None
+    ) -> None:
+        """Attach a source to an agent"""
+        if source_id is None and source_name is None:
+            raise ValueError("Must provide either source_id or source_name")
+        if source_id is None:
+            source_id = await self.get_source_id(source_name)
+        await self.server.attach_source_to_agent(agent_id, source_id)
+
+    async def detach_source_from_agent(
+        self, 
+        agent_id: str, 
+        source_id: Optional[str] = None,
+        source_name: Optional[str] = None
+    ) -> Source:
+        """Detach a source from an agent"""
+        if source_id is None and source_name is None:
+            raise ValueError("Must provide either source_id or source_name")
+        if source_id is None:
+            source_id = await self.get_source_id(source_name)
+        return await self.server.detach_source_from_agent(agent_id, source_id)
+
+    async def alist_sources(self) -> List[Source]:
+        """Async version of list_sources"""
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/sources",
+            headers=self.headers
+        )
+        return [Source(**source) for source in response]
+
+    async def aget_source(self, source_id: str) -> Source:
+        """Async version of get_source"""
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/sources/{source_id}",
+            headers=self.headers
+        )
+        return Source(**response)
+
+    async def aget_source_id(self, source_name: str) -> str:
+        """Async version of get_source_id"""
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/sources/name/{source_name}",
+            headers=self.headers
+        )
+        return response
+
+    async def acreate_source(self, name: str) -> Source:
+        """Async version of create_source"""
+        payload = {"name": name}
+        response = await make_async_post_request(
+            f"{self.base_url}/{self.api_prefix}/sources",
+            headers=self.headers,
+            json_data=payload
+        )
+        return Source(**response)
+
+    async def aupdate_source(self, source_id: str, name: Optional[str] = None) -> Source:
+        """Async version of update_source"""
+        request = SourceUpdate(id=source_id, name=name)
+        response = await make_async_request(
+            "PATCH",
+            f"{self.base_url}/{self.api_prefix}/sources/{source_id}",
+            headers=self.headers,
+            json_data=request.model_dump()
+        )
+        return Source(**response)
+
+    async def adelete_source(self, source_id: str):
+        """Async version of delete_source"""
+        await make_async_delete_request(
+            f"{self.base_url}/{self.api_prefix}/sources/{source_id}",
+            headers=self.headers
+        )
+
+    async def alist_files_from_source(
+        self,
+        source_id: str,
+        limit: int = 1000,
+        cursor: Optional[str] = None
+    ) -> List[FileMetadata]:
+        """Async version of list_files_from_source"""
+        params = {"limit": limit, "cursor": cursor}
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/sources/{source_id}/files",
+            headers=self.headers,
+            params=params
+        )
+        return [FileMetadata(**metadata) for metadata in response]
+
+    async def aattach_source_to_agent(self, source_id: str, agent_id: str):
+        """Async version of attach_source_to_agent"""
+        params = {"agent_id": agent_id}
+        await make_async_post_request(
+            f"{self.base_url}/{self.api_prefix}/sources/{source_id}/attach",
+            headers=self.headers,
+            params=params
+        )
+
+    async def adetach_source_from_agent(self, source_id: str, agent_id: str):
+        """Async version of detach_source_from_agent"""
+        params = {"agent_id": agent_id}
+        response = await make_async_post_request(
+            f"{self.base_url}/{self.api_prefix}/sources/{source_id}/detach",
+            headers=self.headers,
+            params=params
+        )
+        return Source(**response)
+
+    async def alist_attached_sources(self, agent_id: str) -> List[Source]:
+        """Async version of list_attached_sources"""
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/agents/{agent_id}/sources",
+            headers=self.headers
+        )
+        return [Source(**source) for source in response]
+
+    async def acreate_org(self, name: Optional[str] = None) -> Organization:
+        """Async version of create_org"""
+        payload = {"name": name}
+        response = await make_async_post_request(
+            f"{self.base_url}/{ADMIN_PREFIX}/orgs",
+            headers=self.headers,
+            json_data=payload
+        )
+        return Organization(**response)
+
+    async def alist_orgs(self, cursor: Optional[str] = None, limit: Optional[int] = 50) -> List[Organization]:
+        """Async version of list_orgs"""
+        params = {"cursor": cursor, "limit": limit}
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{ADMIN_PREFIX}/orgs",
+            headers=self.headers,
+            params=params
+        )
+        return [Organization(**org_data) for org_data in response]
+
+    async def adelete_org(self, org_id: str) -> Organization:
+        """Async version of delete_org"""
+        params = {"org_id": org_id}
+        response = await make_async_delete_request(
+            f"{self.base_url}/{ADMIN_PREFIX}/orgs",
+            headers=self.headers,
+            params=params
+        )
+        return Organization(**response)
+
+    async def aget_in_context_memory(self, agent_id: str) -> Memory:
+        """Async version of get_in_context_memory"""
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/agents/{agent_id}/memory",
+            headers=self.headers
+        )
+        return Memory(**response)
+
+    async def aupdate_in_context_memory(self, agent_id: str, section: str, value: Union[List[str], str]) -> Memory:
+        """Async version of update_in_context_memory"""
+        memory_update_dict = {section: value}
+        response = await make_async_request(
+            "PATCH",
+            f"{self.base_url}/{self.api_prefix}/agents/{agent_id}/memory",
+            headers=self.headers,
+            json_data=memory_update_dict
+        )
+        return Memory(**response)
+
+    async def aget_archival_memory_summary(self, agent_id: str) -> ArchivalMemorySummary:
+        """Async version of get_archival_memory_summary"""
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/agents/{agent_id}/memory/archival",
+            headers=self.headers
+        )
+        return ArchivalMemorySummary(**response)
+
+    async def aget_recall_memory_summary(self, agent_id: str) -> RecallMemorySummary:
+        """Async version of get_recall_memory_summary"""
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/agents/{agent_id}/memory/recall",
+            headers=self.headers
+        )
+        return RecallMemorySummary(**response)
+
+    async def aget_in_context_messages(self, agent_id: str) -> List[Message]:
+        """Async version of get_in_context_messages"""
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/agents/{agent_id}/memory/messages",
+            headers=self.headers
+        )
+        return [Message(**message) for message in response]
+
+    async def auser_message(self, agent_id: str, message: str, include_full_message: Optional[bool] = False) -> LettaResponse:
+        """Async version of user_message"""
+        return await self.asend_message(agent_id, message, role="user", include_full_message=include_full_message)
+
+    async def aget_messages(
+        self, 
+        agent_id: str, 
+        before: Optional[str] = None, 
+        after: Optional[str] = None, 
+        limit: Optional[int] = 1000
+    ) -> List[Message]:
+        """Async version of get_messages"""
+        params = {"before": before, "after": after, "limit": limit, "msg_object": True}
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/agents/{agent_id}/messages",
+            headers=self.headers,
+            params=params
+        )
+        return [Message(**message) for message in response]
+
+    async def ainsert_archival_memory(self, agent_id: str, memory: str) -> List[Passage]:
+        """Async version of insert_archival_memory"""
+        request = CreateArchivalMemory(text=memory)
+        response = await make_async_post_request(
+            f"{self.base_url}/{self.api_prefix}/agents/{agent_id}/archival",
+            headers=self.headers,
+            json_data=request.model_dump()
+        )
+        return [Passage(**passage) for passage in response]
+
+    async def adelete_archival_memory(self, agent_id: str, memory_id: str):
+        """Async version of delete_archival_memory"""
+        await make_async_delete_request(
+            f"{self.base_url}/{self.api_prefix}/agents/{agent_id}/archival/{memory_id}",
+            headers=self.headers
+        )
+
+    async def aget_archival_memory(
+        self, 
+        agent_id: str, 
+        before: Optional[str] = None, 
+        after: Optional[str] = None, 
+        limit: Optional[int] = 1000
+    ) -> List[Passage]:
+        """Async version of get_archival_memory"""
+        params = {"limit": limit}
+        if before:
+            params["before"] = str(before)
+        if after:
+            params["after"] = str(after)
+            
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/agents/{agent_id}/archival",
+            headers=self.headers,
+            params=params
+        )
+        return [Passage(**passage) for passage in response]
+
 
 class LocalClient(AbstractClient):
     """
@@ -1680,7 +2192,6 @@ class LocalClient(AbstractClient):
             memory (Memory): Memory configuration
             system (str): System configuration
             tools (List[str]): List of tools
-            tool_rules (Optional[List[BaseToolRule]]): List of tool rules
             include_base_tools (bool): Include base tools
             metadata (Dict): Metadata
             description (str): Description
@@ -2394,7 +2905,7 @@ class LocalClient(AbstractClient):
         Args:
             id (str): ID of the tool
         """
-        return self.server.tool_manager.delete_tool_by_id(id, user_id=self.user_id)
+        return self.server.tool_manager.delete_tool_by_id(id, self.user)
 
     def get_tool_id(self, name: str) -> Optional[str]:
         """
@@ -2501,7 +3012,7 @@ class LocalClient(AbstractClient):
         """
         return self.server.get_source_id(source_name=source_name, user_id=self.user_id)
 
-    def attach_source_to_agent(self, agent_id: str, source_id: Optional[str] = None, source_name: Optional[str] = None):
+    def attach_source_to_agent(self, source_id: str, agent_id: str):
         """
         Attach a source to an agent
 
@@ -2512,7 +3023,7 @@ class LocalClient(AbstractClient):
         """
         self.server.attach_source_to_agent(source_id=source_id, source_name=source_name, agent_id=agent_id, user_id=self.user_id)
 
-    def detach_source_from_agent(self, agent_id: str, source_id: Optional[str] = None, source_name: Optional[str] = None):
+    def detach_source_from_agent(self, source_id: str, agent_id: str):
         """
         Detach a source from an agent by removing all `Passage` objects that were loaded from the source from archival memory.
         Args:
@@ -2758,3 +3269,116 @@ class LocalClient(AbstractClient):
 
     def delete_org(self, org_id: str) -> Organization:
         return self.server.organization_manager.delete_organization_by_id(org_id=org_id)
+
+    async def load_file_to_source(self, filename: str, source_id: str, blocking=True) -> Job:
+        """Load a file into a source locally"""
+        job_id = str(uuid.uuid4())
+        job = Job(
+            id=job_id,
+            status=JobStatus.created,
+            metadata_={
+                "type": "embedding",
+                "filename": filename,
+                "source_id": source_id
+            }
+        )
+        
+        if blocking:
+            await self.server.load_file_to_source(source_id, filename, job_id)
+        else:
+            asyncio.create_task(self.server.load_file_to_source(source_id, filename, job_id))
+            
+        return job
+
+    async def list_jobs(self) -> List[Job]:
+        """List all jobs"""
+        return await self.server.list_jobs()
+
+    async def list_active_jobs(self) -> List[Job]:
+        """List active jobs"""
+        return await self.server.list_active_jobs()
+
+    async def get_job(self, job_id: str) -> Job:
+        """Get a job by ID"""
+        return await self.server.get_job(job_id)
+
+    async def delete_job(self, job_id: str) -> None:
+        """Delete a job"""
+        await self.server.delete_job(job_id)
+
+    async def create_source(self, name: str) -> Source:
+        """Create a new source"""
+        return await self.server.create_source(name)
+
+    async def get_source(self, source_id: str) -> Source:
+        """Get a source by ID"""
+        return await self.server.get_source(source_id)
+
+    async def list_sources(self) -> List[Source]:
+        """List all sources"""
+        return await self.server.list_all_sources()
+
+    async def update_source(self, source_id: str, name: Optional[str] = None) -> Source:
+        """Update a source"""
+        return await self.server.update_source(source_id, name)
+
+    async def delete_source(self, source_id: str) -> None:
+        """Delete a source"""
+        await self.server.delete_source(source_id)
+
+    async def attach_source_to_agent(
+        self, 
+        agent_id: str, 
+        source_id: Optional[str] = None,
+        source_name: Optional[str] = None
+    ) -> None:
+        """Attach a source to an agent"""
+        if source_id is None and source_name is None:
+            raise ValueError("Must provide either source_id or source_name")
+        if source_id is None:
+            source_id = await self.get_source_id(source_name)
+        await self.server.attach_source_to_agent(agent_id, source_id)
+
+    async def detach_source_from_agent(
+        self, 
+        agent_id: str, 
+        source_id: Optional[str] = None,
+        source_name: Optional[str] = None
+    ) -> Source:
+        """Detach a source from an agent"""
+        if source_id is None and source_name is None:
+            raise ValueError("Must provide either source_id or source_name")
+        if source_id is None:
+            source_id = await self.get_source_id(source_name)
+        return await self.server.detach_source_from_agent(agent_id, source_id)
+
+    async def acreate_org(self, name: Optional[str] = None) -> Organization:
+        """Async version of create_org"""
+        payload = {"name": name}
+        response = await make_async_post_request(
+            f"{self.base_url}/{ADMIN_PREFIX}/orgs",
+            headers=self.headers,
+            json_data=payload
+        )
+        return Organization(**response)
+
+    async def alist_orgs(self, cursor: Optional[str] = None, limit: Optional[int] = 50) -> List[Organization]:
+        """Async version of list_orgs"""
+        params = {"cursor": cursor, "limit": limit}
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{ADMIN_PREFIX}/orgs",
+            headers=self.headers,
+            params=params
+        )
+        return [Organization(**org_data) for org_data in response]
+
+    async def adelete_org(self, org_id: str) -> Organization:
+        """Async version of delete_org"""
+        params = {"org_id": org_id}
+        response = await make_async_delete_request(
+            f"{self.base_url}/{ADMIN_PREFIX}/orgs",
+            headers=self.headers,
+            params=params
+        )
+        return Organization(**response)

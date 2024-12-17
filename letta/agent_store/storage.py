@@ -5,7 +5,7 @@ We originally tried to use Llama Index VectorIndex, but their limited API was ex
 
 import uuid
 from abc import abstractmethod
-from typing import Dict, List, Optional, Tuple, Type, Union
+from typing import Dict, List, Optional, Tuple, Type, Union, AsyncIterator
 
 from pydantic import BaseModel
 
@@ -138,53 +138,66 @@ class StorageConnector:
         return StorageConnector.get_storage_connector(TableType.RECALL_MEMORY, config, user_id, agent_id)
 
     @abstractmethod
-    def get_filters(self, filters: Optional[Dict] = {}) -> Union[Tuple[list, dict], dict]:
+    async def get_filters(self, filters: Optional[Dict] = {}) -> Union[Tuple[list, dict], dict]:
+        """Get filters for the storage backend"""
         pass
 
     @abstractmethod
-    def get_all_paginated(self, filters: Optional[Dict] = {}, page_size: int = 1000):
+    async def get_all_paginated(self, filters: Optional[Dict] = {}, page_size: int = 1000) -> AsyncIterator[List[BaseModel]]:
+        """Get all records matching filters in paginated form"""
         pass
 
     @abstractmethod
-    def get_all(self, filters: Optional[Dict] = {}, limit=10):
+    async def get_all(self, filters: Optional[Dict] = {}, limit=10) -> List[BaseModel]:
+        """Get all records matching filters up to limit"""
         pass
 
     @abstractmethod
-    def get(self, id: uuid.UUID):
+    async def get(self, id: uuid.UUID) -> Optional[BaseModel]:
+        """Get a single record by ID"""
         pass
 
     @abstractmethod
-    def size(self, filters: Optional[Dict] = {}) -> int:
+    async def size(self, filters: Optional[Dict] = {}) -> int:
+        """Get count of records matching filters"""
         pass
 
     @abstractmethod
-    def insert(self, record):
+    async def insert(self, record: BaseModel):
+        """Insert a single record"""
         pass
 
     @abstractmethod
-    def insert_many(self, records, show_progress=False):
+    async def insert_many(self, records: List[BaseModel], show_progress=False):
+        """Insert multiple records"""
         pass
 
     @abstractmethod
-    def query(self, query: str, query_vec: List[float], top_k: int = 10, filters: Optional[Dict] = {}):
+    async def query(self, query: str, query_vec: List[float], top_k: int = 10, filters: Optional[Dict] = {}) -> List[BaseModel]:
+        """Query records by vector similarity"""
         pass
 
     @abstractmethod
-    def query_date(self, start_date, end_date):
+    async def query_date(self, start_date, end_date) -> List[BaseModel]:
+        """Query records by date range"""
         pass
 
     @abstractmethod
-    def query_text(self, query):
+    async def query_text(self, query: str) -> List[BaseModel]:
+        """Query records by text search"""
         pass
 
     @abstractmethod
-    def delete_table(self):
+    async def delete_table(self):
+        """Delete the entire table"""
         pass
 
     @abstractmethod
-    def delete(self, filters: Optional[Dict] = {}):
+    async def delete(self, filters: Optional[Dict] = {}):
+        """Delete records matching filters"""
         pass
 
     @abstractmethod
-    def save(self):
+    async def save(self):
+        """Save any pending changes"""
         pass

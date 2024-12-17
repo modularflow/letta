@@ -2,6 +2,7 @@ import uuid
 from typing import List, Optional, Tuple
 
 import requests
+import httpx
 
 from letta.constants import NON_USER_MSG_PREFIX
 from letta.llm_api.helpers import make_post_request
@@ -402,15 +403,13 @@ def convert_google_ai_response_to_chatcompletion(
 
 
 # TODO convert 'data' type to pydantic
-def google_ai_chat_completions_request(
+async def google_ai_chat_completions_request(
     base_url: str,
     model: str,
     api_key: str,
     data: dict,
     key_in_header: bool = True,
     add_postfunc_model_messages: bool = True,
-    # NOTE: Google AI API doesn't support mixing parts 'text' and 'function',
-    # so there's no clean way to put inner thoughts in the same message as a function call
     inner_thoughts_in_kwargs: bool = True,
 ) -> ChatCompletionResponse:
     """https://ai.google.dev/docs/function_calling
@@ -424,20 +423,20 @@ def google_ai_chat_completions_request(
 
     assert api_key is not None, "Missing api_key when calling Google AI"
 
-    url, headers = get_gemini_endpoint_and_headers(base_url, model, api_key, key_in_header, generate_content=True)
-
-    # data["contents"][-1]["role"] = "model"
+    url, headers = get_gemini_endpoint_and_headers(
+        base_url, model, api_key, key_in_header, generate_content=True
+    )
+    
     if add_postfunc_model_messages:
         data["contents"] = add_dummy_model_messages(data["contents"])
-
-    response_json = make_post_request(url, headers, data)
-    try:
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, json=data, headers=headers)
+        response.raise_for_status()
+        response_json = response.json()
         return convert_google_ai_response_to_chatcompletion(
             response_json=response_json,
             model=data.get("model"),
             input_messages=data["contents"],
             pull_inner_thoughts_from_args=inner_thoughts_in_kwargs,
         )
-    except Exception as conversion_error:
-        print(f"Error during response conversion: {conversion_error}")
-        raise conversion_error

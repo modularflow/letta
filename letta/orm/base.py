@@ -9,10 +9,20 @@ from sqlalchemy.orm import (
     declared_attr,
     mapped_column,
 )
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
 
 
 class Base(DeclarativeBase):
-    """absolute base for sqlalchemy classes"""
+    """absolute base for sqlalchemy classes with async support"""
+
+    @classmethod
+    def get_async_session(cls):
+        engine = create_async_engine(...)  # Configure with your DB URL
+        AsyncSessionLocal = sessionmaker(
+            engine, class_=AsyncSession, expire_on_commit=False
+        )
+        return AsyncSessionLocal
 
 
 @declarative_mixin

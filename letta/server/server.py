@@ -443,7 +443,6 @@ class SyncServer(Server):
         user_id: str,
         agent_id: str,
         input_messages: Union[Message, List[Message]],
-        # timestamp: Optional[datetime],
     ) -> LettaUsageStatistics:
         """Send the input message through the agent"""
 
@@ -601,7 +600,7 @@ class SyncServer(Server):
                             "function_call").get("arguments"))
                         args["message"] = text
                         letta_agent.messages[x].get("function_call").update(
-                            {"arguments": json_dumps(args)})
+                            {"arguments": json_dumps(args)}))
                         break
 
         # No skip options
@@ -1794,41 +1793,79 @@ class SyncServer(Server):
             if job.status in [JobStatus.created, JobStatus.running]
         ]
 
-    def load_file_to_source(self, source_id: str, file_path: str,
-                            job_id: str) -> Job:
+    async def load_file_to_source(self, source_id: str, file_path: str, job_id: str) -> None:
+        """Load a file into a source asynchronously"""
+        try:
+            # Update job status to processing
+            self.update_job_status(job_id, JobStatus.processing)
+            
+            # Process file and create embeddings
+            source = self.get_source(source_id)
+            num_passages = await self._process_file(file_path, source)
+            
+            # Update job metadata and status
+            self.update_job(
+                job_id,
+                status=JobStatus.completed,
+                metadata={
+                    "num_passages": num_passages,
+                    "source_id": source_id,
+                }
+            )
+        except Exception as e:
+            # Update job status to failed if there's an error
+            self.update_job(
+                job_id,
+                status=JobStatus.failed,
+                metadata={"error": str(e)}
+            )
+            raise
 
-        # update job
-        job = self.ms.get_job(job_id)
-        job.status = JobStatus.running
-        self.ms.update_job(job)
+    async def _process_file(self, file_path: str, source: Source) -> int:
+        """Process a file and create embeddings asynchronously"""
+        # Load document
+        documents = await self.document_store.aload_documents(file_path)
+        
+        # Create passages
+        passages = []
+        for doc in documents:
+            passages.extend(await self.passage_store.acreate_passages(doc))
+            
+        # Create embeddings
+        await self.embedding_store.acreate_embeddings(passages)
+        
+        return len(passages)
 
-        # try:
-        from letta.data_sources.connectors import DirectoryConnector
+    async def create_source(self, name: str) -> Source:
+        """Create a new source asynchronously"""
+        source = Source(
+            id=f"source-{uuid.uuid4()}",
+            name=name,
+            created_at=datetime.now(timezone.utc),
+            metadata_={"num_passages": 0, "num_documents": 0}
+        )
+        await self.source_store.asave(source)
+        return source
 
-        source = self.ms.get_source(source_id=source_id)
-        connector = DirectoryConnector(input_files=[file_path])
-        num_passages, num_documents = self.load_data(user_id=source.user_id,
-                                                     source_name=source.name,
-                                                     connector=connector)
-        # except Exception as e:
-        #    # job failed with error
-        #    error = str(e)
-        #    print(error)
-        #    job.status = JobStatus.failed
-        #    job.metadata_["error"] = error
-        #    self.ms.update_job(job)
-        #    # TODO: delete any associated passages/files?
+    async def get_source(self, source_id: str) -> Source:
+        """Get a source by ID asynchronously"""
+        return await self.source_store.aget(source_id)
 
-        #    # return failed job
-        #    return job
+    async def list_all_sources(self) -> List[Source]:
+        """List all sources asynchronously"""
+        return await self.source_store.alist()
 
-        # update job status
-        job.status = JobStatus.completed
-        job.metadata_["num_passages"] = num_passages
-        job.metadata_["num_documents"] = num_documents
-        self.ms.update_job(job)
+    async def update_source(self, source_id: str, name: Optional[str] = None) -> Source:
+        """Update a source asynchronously"""
+        source = await self.get_source(source_id)
+        if name is not None:
+            source.name = name
+        await self.source_store.asave(source)
+        return source
 
-        return job
+    async def delete_source(self, source_id: str) -> None:
+        """Delete a source asynchronously"""
+        await self.source_store.adelete(source_id)
 
     def delete_file_from_source(
             self, source_id: str, file_id: str,
@@ -2115,3 +2152,368 @@ class SyncServer(Server):
         # Get the current message
         letta_agent = self._get_or_load_agent(agent_id=agent_id)
         return letta_agent.get_context_window()
+
+
+class AsyncServer(Server):
+    """Async server implementation that supports multi-agent multi-user"""
+
+    def __init__(self, chaining: bool = True, max_chaining_steps: Optional[bool] = None,
+                 default_interface_factory: Callable[[], AgentInterface] = lambda: CLIInterface(),
+                 init_with_default_org_and_user: bool = True):
+        """Initialize the async server with async managers"""
+        self.chaining = chaining
+        self.max_chaining_steps = max_chaining_steps
+        self.default_interface_factory = default_interface_factory
+        self.credentials = LettaCredentials.load()
+
+        # Initialize the metadata store
+        config = LettaConfig.load()
+        if settings.letta_pg_uri_no_default:
+            config.recall_storage_type = "postgres"
+            config.recall_storage_uri = settings.letta_pg_uri_no_default
+            config.archival_storage_type = "postgres"
+            config.archival_storage_uri = settings.letta_pg_uri_no_default
+        config.save()
+        self.config = config
+        self.ms = MetadataStore(self.config)
+
+        # Initialize async managers
+        self.organization_manager = AsyncOrganizationManager()
+        self.user_manager = AsyncUserManager()
+        self.tool_manager = AsyncToolManager()
+        self.agents_tags_manager = AsyncAgentsTagsManager()
+
+        # Make default user and org
+        if init_with_default_org_and_user:
+            self.default_org = await self.organization_manager.create_default_organization()
+            self.default_user = await self.user_manager.create_default_user()
+            await self.add_default_blocks(self.default_user.id)
+            await self.tool_manager.add_base_tools(actor=self.default_user)
+
+            # If there is a default org/user
+            # This logic may have to change in the future
+            if settings.load_default_external_tools:
+                await self.add_default_external_tools(actor=self.default_user)
+
+        # collect providers (always has Letta as a default)
+        self._enabled_providers: List[Provider] = [LettaProvider()]
+        if model_settings.openai_api_key:
+            self._enabled_providers.append(
+                OpenAIProvider(
+                    api_key=model_settings.openai_api_key,
+                    base_url=model_settings.openai_api_base,
+                ))
+        if model_settings.anthropic_api_key:
+            self._enabled_providers.append(
+                AnthropicProvider(api_key=model_settings.anthropic_api_key, ))
+        if model_settings.ollama_base_url:
+            self._enabled_providers.append(
+                OllamaProvider(
+                    base_url=model_settings.ollama_base_url,
+                    api_key=None,
+                    default_prompt_formatter=model_settings.
+                    default_prompt_formatter,
+                ))
+        if model_settings.gemini_api_key:
+            self._enabled_providers.append(
+                GoogleAIProvider(api_key=model_settings.gemini_api_key, ))
+        if model_settings.azure_api_key and model_settings.azure_base_url:
+            assert model_settings.azure_api_version, "AZURE_API_VERSION is required"
+            self._enabled_providers.append(
+                AzureProvider(
+                    api_key=model_settings.azure_api_key,
+                    base_url=model_settings.azure_base_url,
+                    api_version=model_settings.azure_api_version,
+                ))
+        if model_settings.groq_api_key:
+            self._enabled_providers.append(
+                GroqProvider(api_key=model_settings.groq_api_key))
+        if model_settings.vllm_api_base:
+            # vLLM exposes both a /chat/completions and a /completions endpoint
+            self._enabled_providers.append(
+                VLLMCompletionsProvider(
+                    base_url=model_settings.vllm_api_base,
+                    default_prompt_formatter=model_settings.
+                    default_prompt_formatter,
+                ))
+            # NOTE: to use the /chat/completions endpoint, you need to specify extra flags on vLLM startup
+            # see: https://docs.vllm.ai/en/latest/getting_started/examples/openai_chat_completion_client_with_tools.html
+            # e.g. "... --enable-auto-tool-choice --tool-call-parser hermes"
+            self._enabled_providers.append(
+                VLLMChatCompletionsProvider(
+                    base_url=model_settings.vllm_api_base, ))
+
+    async def list_agents(self, user_id: str) -> dict:
+        """List all available agents to a user"""
+        user = await self.user_manager.get_user_by_id(user_id=user_id)
+        agents_states = await self.ms.list_agents(user_id=user_id)
+        return agents_states
+
+    async def get_agent_messages(self, user_id: str, agent_id: str, start: int,
+                           count: int) -> list:
+        """Paginated query of in-context messages in agent message queue"""
+        if await self.user_manager.get_user_by_id(user_id=user_id) is None:
+            raise ValueError(f"User user_id={user_id} does not exist")
+        if await self.ms.get_agent(agent_id=agent_id, user_id=user_id) is None:
+            raise ValueError(f"Agent agent_id={agent_id} does not exist")
+
+        # Get the agent object (loaded in memory)
+        agent = await self._get_or_load_agent(agent_id=agent_id)
+        return await agent.get_messages(start=start, count=count)
+
+    async def get_agent_memory(self, user_id: str, agent_id: str) -> dict:
+        """Return the memory of an agent (core memory + non-core statistics)"""
+        if await self.user_manager.get_user_by_id(user_id=user_id) is None:
+            raise ValueError(f"User user_id={user_id} does not exist")
+        if await self.ms.get_agent(agent_id=agent_id, user_id=user_id) is None:
+            raise ValueError(f"Agent agent_id={agent_id} does not exist")
+
+        # Get the agent object (loaded in memory)
+        agent = await self._get_or_load_agent(agent_id=agent_id)
+        return agent.memory
+
+    async def get_agent_state(self, user_id: str, agent_id: str) -> dict:
+        """Return the config of an agent"""
+        if await self.user_manager.get_user_by_id(user_id=user_id) is None:
+            raise ValueError(f"User user_id={user_id} does not exist")
+        if await self.ms.get_agent(agent_id=agent_id, user_id=user_id) is None:
+            raise ValueError(f"Agent agent_id={agent_id} does not exist")
+
+        # Get the agent object (loaded in memory)
+        agent = await self._get_or_load_agent(agent_id=agent_id)
+        return agent.agent_state
+
+    async def get_server_config(self, user_id: str) -> dict:
+        """Return the base config"""
+        return self.config
+
+    async def update_agent_core_memory(self, user_id: str, agent_id: str,
+                                new_memory_contents: dict) -> dict:
+        """Update the agents core memory block, return the new state"""
+        if await self.user_manager.get_user_by_id(user_id=user_id) is None:
+            raise ValueError(f"User user_id={user_id} does not exist")
+        if await self.ms.get_agent(agent_id=agent_id, user_id=user_id) is None:
+            raise ValueError(f"Agent agent_id={agent_id} does not exist")
+
+        # Get the agent object (loaded in memory)
+        agent = await self._get_or_load_agent(agent_id=agent_id)
+        await agent.update_memory(new_memory_contents)
+        return agent.memory
+
+    async def create_agent(self, user_id: str, agent_config: dict) -> dict:
+        """Create a new agent"""
+        if await self.user_manager.get_user_by_id(user_id=user_id) is None:
+            raise ValueError(f"User user_id={user_id} does not exist")
+
+        # Create agent with async tool manager
+        agent_state = await self.tool_manager.create_agent_tools(agent_config)
+        agent = await self._create_agent_instance(agent_state)
+        return agent.agent_state
+
+    async def delete_agent(self, user_id: str, agent_id: str) -> None:
+        """Delete an agent"""
+        if await self.user_manager.get_user_by_id(user_id=user_id) is None:
+            raise ValueError(f"User user_id={user_id} does not exist")
+        if await self.ms.get_agent(agent_id=agent_id, user_id=user_id) is None:
+            raise ValueError(f"Agent agent_id={agent_id} does not exist")
+
+        # Delete agent and its tools
+        await self.tool_manager.delete_agent_tools(agent_id)
+        await self.ms.delete_agent(agent_id)
+
+    async def update_agent(self, user_id: str, agent_id: str, 
+                     update_dict: dict) -> dict:
+        """Update an agent's config"""
+        if await self.user_manager.get_user_by_id(user_id=user_id) is None:
+            raise ValueError(f"User user_id={user_id} does not exist")
+        if await self.ms.get_agent(agent_id=agent_id, user_id=user_id) is None:
+            raise ValueError(f"Agent agent_id={agent_id} does not exist")
+
+        # Update agent with async tool manager
+        agent_state = await self.tool_manager.update_agent_tools(agent_id, update_dict)
+        agent = await self._get_or_load_agent(agent_id)
+        await agent.update_state(agent_state)
+        return agent.agent_state
+
+    async def load_file_to_source(self, source_id: str, file_path: str, 
+                            job_id: str) -> None:
+        """Load a file into a source"""
+        try:
+            # Update job status to processing
+            await self.update_job_status(job_id, JobStatus.processing)
+            
+            # Process file and create embeddings
+            source = await self.get_source(source_id)
+            num_passages = await self._process_file(file_path, source)
+            
+            # Update job metadata and status
+            await self.update_job(
+                job_id,
+                status=JobStatus.completed,
+                metadata={
+                    "num_passages": num_passages,
+                    "source_id": source_id,
+                }
+            )
+        except Exception as e:
+            # Update job status to failed if there's an error
+            await self.update_job(
+                job_id,
+                status=JobStatus.failed,
+                metadata={"error": str(e)}
+            )
+            raise
+
+    async def delete_file_from_source(self, source_id: str, file_id: str, 
+                                user_id: str) -> None:
+        """Delete a file from a source"""
+        if await self.user_manager.get_user_by_id(user_id=user_id) is None:
+            raise ValueError(f"User user_id={user_id} does not exist")
+        if await self.ms.get_source(source_id=source_id) is None:
+            raise ValueError(f"Source source_id={source_id} does not exist")
+
+        await self.ms.delete_file_from_source(source_id, file_id)
+
+    async def create_job(self, user_id: str, metadata: dict) -> Job:
+        """Create a new job"""
+        if await self.user_manager.get_user_by_id(user_id=user_id) is None:
+            raise ValueError(f"User user_id={user_id} does not exist")
+
+        job = Job(user_id=user_id, status=JobStatus.created, metadata_=metadata)
+        await self.ms.create_job(job)
+        return job
+
+    async def get_job(self, job_id: str) -> Job:
+        """Get a job by ID"""
+        return await self.ms.get_job(job_id)
+
+    async def delete_job(self, job_id: str) -> None:
+        """Delete a job"""
+        await self.ms.delete_job(job_id)
+
+    async def list_jobs(self, user_id: str) -> List[Job]:
+        """List all jobs for a user"""
+        if await self.user_manager.get_user_by_id(user_id=user_id) is None:
+            raise ValueError(f"User user_id={user_id} does not exist")
+
+        return await self.ms.list_jobs(user_id=user_id)
+
+    async def list_active_jobs(self, user_id: str) -> List[Job]:
+        """List active jobs for a user"""
+        jobs = await self.list_jobs(user_id=user_id)
+        return [job for job in jobs if job.status in [JobStatus.created, JobStatus.running]]
+
+    async def _step(
+        self,
+        user_id: str,
+        agent_id: str,
+        input_messages: Union[Message, List[Message]],
+    ) -> LettaUsageStatistics:
+        """Send the input message through the agent asynchronously"""
+
+        # Input validation
+        if isinstance(input_messages, Message):
+            input_messages = [input_messages]
+        if not all(isinstance(m, Message) for m in input_messages):
+            raise ValueError(
+                f"messages should be a Message or a list of Message, got {type(input_messages)}"
+            )
+
+        logger.debug(f"Got input messages: {input_messages}")
+        letta_agent = None
+        try:
+            # Get the agent object (loaded in memory)
+            letta_agent = await self._get_or_load_agent(agent_id=agent_id)
+            if letta_agent is None:
+                raise KeyError(
+                    f"Agent (user={user_id}, agent={agent_id}) is not loaded")
+
+            # Determine whether or not to token stream based on the capability of the interface
+            token_streaming = letta_agent.interface.streaming_mode if hasattr(
+                letta_agent.interface, "streaming_mode") else False
+
+            logger.debug(f"Starting agent step")
+            usage_stats = await letta_agent.astep(
+                messages=input_messages,
+                chaining=self.chaining,
+                max_chaining_steps=self.max_chaining_steps,
+                stream=token_streaming,
+                ms=self.ms,
+                skip_verify=True,
+            )
+
+        except Exception as e:
+            logger.error(f"Error in server._step: {e}")
+            print(traceback.print_exc())
+            raise
+        finally:
+            logger.debug("Calling step_yield()")
+            if letta_agent:
+                await letta_agent.interface.astep_yield()
+
+        return usage_stats
+
+    async def _command(self, user_id: str, agent_id: str, command: str) -> LettaUsageStatistics:
+        """Execute a command on an agent asynchronously"""
+        usage = None
+        letta_agent = None
+
+        try:
+            # Get the agent object (loaded in memory)
+            letta_agent = await self._get_or_load_agent(agent_id=agent_id)
+            if letta_agent is None:
+                raise KeyError(
+                    f"Agent (user={user_id}, agent={agent_id}) is not loaded")
+
+            # Handle different commands
+            if command.lower() == "reset":
+                await letta_agent.areset()
+
+            elif command.lower() == "undo":
+                await letta_agent.aundo()
+
+            elif command.lower() == "redo":
+                await letta_agent.aredo()
+
+            elif command.lower() == "rewrite" or command.lower().startswith(
+                    "rewrite "):
+                # TODO this needs to also modify the persistence manager
+                if len(command) < len("rewrite "):
+                    logger.warning("Missing text after the command")
+                else:
+                    for x in range(len(letta_agent.messages) - 1, 0, -1):
+                        if letta_agent.messages[x].get("role") == "assistant":
+                            text = command[len("rewrite "):].strip()
+                            args = json_loads(letta_agent.messages[x].get(
+                                "function_call").get("arguments"))
+                            args["message"] = text
+                            letta_agent.messages[x].get("function_call").update(
+                                {"arguments": json_dumps(args)})
+                            break
+
+            # No skip options
+            elif command.lower() == "wipe":
+                # exit not supported on server.py
+                raise ValueError(command)
+
+            elif command.lower() == "heartbeat":
+                input_message = system.get_heartbeat()
+                usage = await self._step(user_id=user_id,
+                                    agent_id=agent_id,
+                                    input_message=input_message)
+
+            elif command.lower() == "memorywarning":
+                input_message = system.get_token_limit_warning()
+                usage = await self._step(user_id=user_id,
+                                    agent_id=agent_id,
+                                    input_message=input_message)
+
+        except Exception as e:
+            logger.error(f"Error in server._command: {e}")
+            print(traceback.print_exc())
+            raise
+
+        if not usage:
+            usage = LettaUsageStatistics()
+
+        return usage

@@ -1,7 +1,7 @@
 import importlib
 import inspect
 import warnings
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from letta.functions.functions import derive_openai_json_schema, load_function_set
 
@@ -168,6 +168,150 @@ class ToolManager:
                 # create to tool
                 tools.append(
                     self.create_or_update_tool(
+                        PydanticTool(
+                            name=name,
+                            tags=tags,
+                            source_type="python",
+                            module=schema["module"],
+                            source_code=source_code,
+                            json_schema=schema["json_schema"],
+                        ),
+                        actor=actor,
+                    )
+                )
+
+        return tools
+
+
+class AsyncToolManager:
+    """Async manager class to handle business logic related to Tools."""
+
+    BASE_TOOL_NAMES = [
+        "send_message",
+        "conversation_search",
+        "conversation_search_date",
+        "archival_memory_insert",
+        "archival_memory_search",
+    ]
+
+    def __init__(self):
+        from letta.server.server import db_context
+        self.session_maker = db_context
+
+    @enforce_types
+    async def create_or_update_tool(self, pydantic_tool: PydanticTool, actor: PydanticUser) -> PydanticTool:
+        """Create a new tool based on the ToolCreate schema."""
+        derived_json_schema = pydantic_tool.json_schema or derive_openai_json_schema(source_code=pydantic_tool.source_code)
+        derived_name = pydantic_tool.name or derived_json_schema["name"]
+
+        try:
+            tool = await self.get_tool_by_name(tool_name=derived_name, actor=actor)
+            update_data = pydantic_tool.model_dump(exclude={"module"}, exclude_unset=True, exclude_none=True)
+            update_data = {key: value for key, value in update_data.items() if getattr(tool, key) != value}
+
+            if update_data:
+                await self.update_tool_by_id(tool.id, ToolUpdate(**update_data), actor)
+            else:
+                printd(
+                    f"`create_or_update_tool` was called with user_id={actor.id}, organization_id={actor.organization_id}, name={pydantic_tool.name}, but found existing tool with nothing to update."
+                )
+        except NoResultFound:
+            pydantic_tool.json_schema = derived_json_schema
+            pydantic_tool.name = derived_name
+            tool = await self.create_tool(pydantic_tool, actor=actor)
+
+        return tool
+
+    @enforce_types
+    async def create_tool(self, pydantic_tool: PydanticTool, actor: PydanticUser) -> PydanticTool:
+        """Create a new tool based on the ToolCreate schema."""
+        async with self.session_maker() as session:
+            pydantic_tool.organization_id = actor.organization_id
+            tool_data = pydantic_tool.model_dump()
+            tool = ToolModel(**tool_data)
+            await tool.create(session, actor=actor)
+            return tool.to_pydantic()
+
+    @enforce_types
+    async def get_tool_by_id(self, tool_id: str, actor: PydanticUser) -> PydanticTool:
+        """Fetch a tool by its ID."""
+        async with self.session_maker() as session:
+            tool = await ToolModel.read(db_session=session, identifier=tool_id, actor=actor)
+            return tool.to_pydantic()
+
+    @enforce_types
+    async def get_tool_by_name(self, tool_name: str, actor: PydanticUser):
+        """Retrieve a tool by its name and a user."""
+        async with self.session_maker() as session:
+            tool = await ToolModel.read(db_session=session, name=tool_name, actor=actor)
+            return tool.to_pydantic()
+
+    @enforce_types
+    async def list_tools(self, actor: PydanticUser, cursor: Optional[str] = None, limit: Optional[int] = 50) -> List[PydanticTool]:
+        """List all tools with optional pagination."""
+        async with self.session_maker() as session:
+            tools = await ToolModel.list(
+                db_session=session,
+                cursor=cursor,
+                limit=limit,
+                organization_id=actor.organization_id,
+            )
+            return [tool.to_pydantic() for tool in tools]
+
+    @enforce_types
+    async def update_tool_by_id(self, tool_id: str, tool_update: ToolUpdate, actor: PydanticUser) -> PydanticTool:
+        """Update a tool by its ID with the given ToolUpdate object."""
+        async with self.session_maker() as session:
+            tool = await ToolModel.read(db_session=session, identifier=tool_id, actor=actor)
+
+            update_data = tool_update.model_dump(exclude_unset=True, exclude_none=True)
+            for key, value in update_data.items():
+                setattr(tool, key, value)
+
+            if "source_code" in update_data.keys() and "json_schema" not in update_data.keys():
+                pydantic_tool = tool.to_pydantic()
+                new_schema = derive_openai_json_schema(source_code=pydantic_tool.source_code)
+                tool.json_schema = new_schema
+
+            return await tool.update(db_session=session, actor=actor)
+
+    @enforce_types
+    async def delete_tool_by_id(self, tool_id: str, actor: PydanticUser) -> None:
+        """Delete a tool by its ID."""
+        async with self.session_maker() as session:
+            try:
+                tool = await ToolModel.read(db_session=session, identifier=tool_id, actor=actor)
+                await tool.delete(db_session=session, actor=actor)
+            except NoResultFound:
+                raise ValueError(f"Tool with id {tool_id} not found.")
+
+    @enforce_types
+    async def add_base_tools(self, actor: PydanticUser) -> List[PydanticTool]:
+        """Add default tools in base.py"""
+        module_name = "base"
+        full_module_name = f"letta.functions.function_sets.{module_name}"
+        try:
+            module = importlib.import_module(full_module_name)
+        except Exception as e:
+            raise e
+
+        functions_to_schema = []
+        try:
+            functions_to_schema = load_function_set(module)
+        except ValueError as e:
+            err = f"Error loading function set '{module_name}': {e}"
+            warnings.warn(err)
+
+        tools = []
+        for name, schema in functions_to_schema.items():
+            if name in self.BASE_TOOL_NAMES:
+                source_code = inspect.getsource(schema["python_function"])
+                tags = [module_name]
+                if module_name == "base":
+                    tags.append("letta-base")
+
+                tools.append(
+                    await self.create_or_update_tool(
                         PydanticTool(
                             name=name,
                             tags=tags,

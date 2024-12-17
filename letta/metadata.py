@@ -446,6 +446,50 @@ class MetadataStore:
         self.session_maker = db_context
 
     @enforce_types
+    async def get_agent(
+        self, 
+        agent_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        user_id: Optional[str] = None
+    ) -> Optional[AgentState]:
+        with self.session_maker() as session:
+            if agent_id:
+                results = session.query(AgentModel).filter(AgentModel.id == agent_id).all()
+            else:
+                assert agent_name is not None and user_id is not None, "Must provide either agent_id or agent_name"
+                results = session.query(AgentModel).filter(AgentModel.name == agent_name).filter(AgentModel.user_id == user_id).all()
+
+            if len(results) == 0:
+                return None
+            assert len(results) == 1, f"Expected 1 result, got {len(results)}"  # should only be one result
+            return results[0].to_record()
+
+    @enforce_types
+    async def update_agent(self, agent_state: AgentState):
+        with self.session_maker() as session:
+            fields = vars(agent_state)
+            if isinstance(agent_state.memory, Memory):  # TODO: this is nasty but this whole class will soon be removed so whatever
+                fields["memory"] = agent_state.memory.to_dict()
+            del fields["_internal_memory"]
+            del fields["tags"]
+            session.query(AgentModel).filter(AgentModel.id == agent_state.id).update(fields)
+            session.commit()
+
+    @enforce_types
+    async def create_agent(self, agent_state: AgentState):
+        # insert into agent table
+        # make sure agent.name does not already exist for user user_id
+        with self.session_maker() as session:
+            if session.query(AgentModel).filter(AgentModel.name == agent_state.name).filter(AgentModel.user_id == agent_state.user_id).count() > 0:
+                raise ValueError(f"Agent with name {agent_state.name} already exists")
+            fields = vars(agent_state)
+            fields["memory"] = agent_state.memory.to_dict()
+            del fields["_internal_memory"]
+            del fields["tags"]
+            session.add(AgentModel(**fields))
+            session.commit()
+
+    @enforce_types
     def create_api_key(self, user_id: str, name: str) -> APIKey:
         """Create an API key for a user"""
         new_api_key = generate_api_key()
@@ -484,20 +528,6 @@ class MetadataStore:
             return tokens
 
     @enforce_types
-    def create_agent(self, agent: AgentState):
-        # insert into agent table
-        # make sure agent.name does not already exist for user user_id
-        with self.session_maker() as session:
-            if session.query(AgentModel).filter(AgentModel.name == agent.name).filter(AgentModel.user_id == agent.user_id).count() > 0:
-                raise ValueError(f"Agent with name {agent.name} already exists")
-            fields = vars(agent)
-            fields["memory"] = agent.memory.to_dict()
-            del fields["_internal_memory"]
-            del fields["tags"]
-            session.add(AgentModel(**fields))
-            session.commit()
-
-    @enforce_types
     def create_source(self, source: Source):
         with self.session_maker() as session:
             if session.query(SourceModel).filter(SourceModel.name == source.name).filter(SourceModel.user_id == source.user_id).count() > 0:
@@ -523,17 +553,6 @@ class MetadataStore:
 
                 raise ValueError(f"Block with name {block.template_name} already exists")
             session.add(BlockModel(**vars(block)))
-            session.commit()
-
-    @enforce_types
-    def update_agent(self, agent: AgentState):
-        with self.session_maker() as session:
-            fields = vars(agent)
-            if isinstance(agent.memory, Memory):  # TODO: this is nasty but this whole class will soon be removed so whatever
-                fields["memory"] = agent.memory.to_dict()
-            del fields["_internal_memory"]
-            del fields["tags"]
-            session.query(AgentModel).filter(AgentModel.id == agent.id).update(fields)
             session.commit()
 
     @enforce_types
@@ -613,22 +632,6 @@ class MetadataStore:
         with self.session_maker() as session:
             results = session.query(SourceModel).filter(SourceModel.user_id == user_id).all()
             return [r.to_record() for r in results]
-
-    @enforce_types
-    def get_agent(
-        self, agent_id: Optional[str] = None, agent_name: Optional[str] = None, user_id: Optional[str] = None
-    ) -> Optional[AgentState]:
-        with self.session_maker() as session:
-            if agent_id:
-                results = session.query(AgentModel).filter(AgentModel.id == agent_id).all()
-            else:
-                assert agent_name is not None and user_id is not None, "Must provide either agent_id or agent_name"
-                results = session.query(AgentModel).filter(AgentModel.name == agent_name).filter(AgentModel.user_id == user_id).all()
-
-            if len(results) == 0:
-                return None
-            assert len(results) == 1, f"Expected 1 result, got {len(results)}"  # should only be one result
-            return results[0].to_record()
 
     @enforce_types
     def get_source(

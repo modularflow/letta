@@ -37,7 +37,7 @@ has_shown_warning = False
 grammar_supported_backends = ["koboldcpp", "llamacpp", "webui", "webui-legacy"]
 
 
-def get_chat_completion(
+async def get_chat_completion(
     model,
     # no model required (except for Ollama), since the model is fixed to whatever you set in your own backend
     messages,
@@ -152,21 +152,21 @@ def get_chat_completion(
 
     try:
         if endpoint_type == "webui":
-            result, usage = get_webui_completion(endpoint, auth_type, auth_key, prompt, context_window, grammar=grammar)
+            result, usage = await get_webui_completion(endpoint, auth_type, auth_key, prompt, context_window, grammar=grammar)
         elif endpoint_type == "webui-legacy":
-            result, usage = get_webui_completion_legacy(endpoint, auth_type, auth_key, prompt, context_window, grammar=grammar)
+            result, usage = await get_webui_completion_legacy(endpoint, auth_type, auth_key, prompt, context_window, grammar=grammar)
         elif endpoint_type == "lmstudio":
-            result, usage = get_lmstudio_completion(endpoint, auth_type, auth_key, prompt, context_window, api="completions")
+            result, usage = await get_lmstudio_completion(endpoint, auth_type, auth_key, prompt, context_window, api="completions")
         elif endpoint_type == "lmstudio-legacy":
-            result, usage = get_lmstudio_completion(endpoint, auth_type, auth_key, prompt, context_window, api="chat")
+            result, usage = await get_lmstudio_completion(endpoint, auth_type, auth_key, prompt, context_window, api="chat")
         elif endpoint_type == "llamacpp":
-            result, usage = get_llamacpp_completion(endpoint, auth_type, auth_key, prompt, context_window, grammar=grammar)
+            result, usage = await get_llamacpp_completion(endpoint, auth_type, auth_key, prompt, context_window, grammar=grammar)
         elif endpoint_type == "koboldcpp":
-            result, usage = get_koboldcpp_completion(endpoint, auth_type, auth_key, prompt, context_window, grammar=grammar)
+            result, usage = await get_koboldcpp_completion(endpoint, auth_type, auth_key, prompt, context_window, grammar=grammar)
         elif endpoint_type == "ollama":
-            result, usage = get_ollama_completion(endpoint, auth_type, auth_key, model, prompt, context_window)
+            result, usage = await get_ollama_completion(endpoint, auth_type, auth_key, model, prompt, context_window)
         elif endpoint_type == "vllm":
-            result, usage = get_vllm_completion(endpoint, auth_type, auth_key, model, prompt, context_window, user)
+            result, usage = await get_vllm_completion(endpoint, auth_type, auth_key, model, prompt, context_window, user)
         else:
             raise LocalLLMError(
                 f"Invalid endpoint type {endpoint_type}, please set variable depending on your backend (webui, lmstudio, llamacpp, koboldcpp)"

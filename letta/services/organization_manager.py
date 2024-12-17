@@ -81,3 +81,74 @@ class OrganizationManager:
         with self.session_maker() as session:
             results = OrganizationModel.list(db_session=session, cursor=cursor, limit=limit)
             return [org.to_pydantic() for org in results]
+
+class AsyncOrganizationManager:
+    """Async manager class to handle business logic related to Organizations."""
+
+    DEFAULT_ORG_ID = "org-00000000-0000-4000-8000-000000000000"
+    DEFAULT_ORG_NAME = "default_org"
+
+    def __init__(self):
+        from letta.server.server import db_context
+        self.session_maker = db_context
+
+    @enforce_types
+    async def get_default_organization(self) -> PydanticOrganization:
+        """Fetch the default organization."""
+        return await self.get_organization_by_id(self.DEFAULT_ORG_ID)
+
+    @enforce_types
+    async def get_organization_by_id(self, org_id: str) -> PydanticOrganization:
+        """Fetch an organization by ID."""
+        async with self.session_maker() as session:
+            try:
+                organization = await OrganizationModel.aread(db_session=session, identifier=org_id)
+                return organization.to_pydantic()
+            except NoResultFound:
+                raise ValueError(f"Organization with id {org_id} not found.")
+
+    @enforce_types
+    async def create_organization(self, pydantic_org: PydanticOrganization) -> PydanticOrganization:
+        """Create a new organization. If a name is provided, it is used, otherwise, a random one is generated."""
+        async with self.session_maker() as session:
+            org = OrganizationModel(**pydantic_org.model_dump())
+            await org.acreate(session)
+            return org.to_pydantic()
+
+    @enforce_types
+    async def create_default_organization(self) -> PydanticOrganization:
+        """Create the default organization."""
+        async with self.session_maker() as session:
+            # Try to get it first
+            try:
+                org = await OrganizationModel.aread(db_session=session, identifier=self.DEFAULT_ORG_ID)
+            # If it doesn't exist, make it
+            except NoResultFound:
+                org = OrganizationModel(name=self.DEFAULT_ORG_NAME, id=self.DEFAULT_ORG_ID)
+                await org.acreate(session)
+
+            return org.to_pydantic()
+
+    @enforce_types
+    async def update_organization_name_using_id(self, org_id: str, name: Optional[str] = None) -> PydanticOrganization:
+        """Update an organization."""
+        async with self.session_maker() as session:
+            org = await OrganizationModel.aread(db_session=session, identifier=org_id)
+            if name:
+                org.name = name
+            await org.aupdate(session)
+            return org.to_pydantic()
+
+    @enforce_types
+    async def delete_organization_by_id(self, org_id: str):
+        """Delete an organization by marking it as deleted."""
+        async with self.session_maker() as session:
+            organization = await OrganizationModel.aread(db_session=session, identifier=org_id)
+            await organization.adelete(session)
+
+    @enforce_types
+    async def list_organizations(self, cursor: Optional[str] = None, limit: Optional[int] = 50) -> List[PydanticOrganization]:
+        """List organizations with pagination using cursor (id) and limit."""
+        async with self.session_maker() as session:
+            results = await OrganizationModel.alist(db_session=session, cursor=cursor, limit=limit)
+            return [org.to_pydantic() for org in results]

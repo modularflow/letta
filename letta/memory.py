@@ -19,8 +19,8 @@ from letta.utils import (
 )
 
 
-def get_memory_functions(cls: Memory) -> Dict[str, Callable]:
-    """Get memory functions for a memory class"""
+async def get_memory_functions(cls: Memory) -> Dict[str, Callable]:
+    """Get memory functions for a memory class asynchronously"""
     functions = {}
 
     # collect base memory functions (should not be included)
@@ -47,7 +47,7 @@ def _format_summary_history(message_history: List[Message]):
     return "\n".join([f"{m.role}: {m.text}" for m in message_history])
 
 
-def summarize_messages(
+async def summarize_messages(
     agent_state: AgentState,
     message_sequence_to_summarize: List[Message],
     insert_acknowledgement_assistant_message: bool = True,
@@ -75,7 +75,7 @@ def summarize_messages(
         message_sequence.append(Message(user_id=dummy_user_id, agent_id=dummy_agent_id, role="assistant", text=MESSAGE_SUMMARY_REQUEST_ACK))
     message_sequence.append(Message(user_id=dummy_user_id, agent_id=dummy_agent_id, role="user", text=summary_input))
 
-    response = create(
+    response = await create(
         llm_config=agent_state.llm_config,
         user_id=agent_state.user_id,
         messages=message_sequence,
@@ -89,26 +89,28 @@ def summarize_messages(
 
 class ArchivalMemory(ABC):
     @abstractmethod
-    def insert(self, memory_string: str):
-        """Insert new archival memory
+    async def ainsert(self, memory_string: str):
+        """Insert new archival memory asynchronously"""
 
-        :param memory_string: Memory string to insert
-        :type memory_string: str
-        """
+    @abstractmethod
+    async def asearch(self, query_string, count=None, start=None) -> Tuple[List[str], int]:
+        """Search archival memory asynchronously"""
+
+    @abstractmethod
+    async def acompile(self) -> str:
+        """Convert archival memory into a string representation for a prompt asynchronously"""
+
+    @abstractmethod
+    async def acount(self) -> int:
+        """Count the number of memories in the archival memory asynchronously"""
+
+    @abstractmethod
+    def insert(self, memory_string: str):
+        """Insert new archival memory"""
 
     @abstractmethod
     def search(self, query_string, count=None, start=None) -> Tuple[List[str], int]:
-        """Search archival memory
-
-        :param query_string: Query string
-        :type query_string: str
-        :param count: Number of results to return (None for all)
-        :type count: Optional[int]
-        :param start: Offset to start returning results from (None if 0)
-        :type start: Optional[int]
-
-        :return: Tuple of (list of results, total number of results)
-        """
+        """Search archival memory"""
 
     @abstractmethod
     def compile(self) -> str:
@@ -121,6 +123,30 @@ class ArchivalMemory(ABC):
 
 class RecallMemory(ABC):
     @abstractmethod
+    async def atext_search(self, query_string, count=None, start=None):
+        """Search messages that match query_string in recall memory asynchronously"""
+
+    @abstractmethod
+    async def adate_search(self, start_date, end_date, count=None, start=None):
+        """Search messages between start_date and end_date in recall memory asynchronously"""
+
+    @abstractmethod
+    async def ainsert(self, message: Message):
+        """Insert message into recall memory asynchronously"""
+
+    @abstractmethod
+    async def ainsert_many(self, messages: List[Message]):
+        """Insert multiple messages into recall memory asynchronously"""
+
+    @abstractmethod
+    async def acompile(self) -> str:
+        """Convert recall memory into a string representation for a prompt asynchronously"""
+
+    @abstractmethod
+    async def acount(self) -> int:
+        """Count the number of memories in the recall memory asynchronously"""
+
+    @abstractmethod
     def text_search(self, query_string, count=None, start=None):
         """Search messages that match query_string in recall memory"""
 
@@ -129,16 +155,20 @@ class RecallMemory(ABC):
         """Search messages between start_date and end_date in recall memory"""
 
     @abstractmethod
+    def insert(self, message: Message):
+        """Insert message into recall memory"""
+
+    @abstractmethod
+    def insert_many(self, messages: List[Message]):
+        """Insert multiple messages into recall memory"""
+
+    @abstractmethod
     def compile(self) -> str:
         """Convert recall memory into a string representation for a prompt"""
 
     @abstractmethod
     def count(self) -> int:
         """Count the number of memories in the recall memory"""
-
-    @abstractmethod
-    def insert(self, message: Message):
-        """Insert message into recall memory"""
 
 
 class DummyRecallMemory(RecallMemory):
@@ -153,16 +183,43 @@ class DummyRecallMemory(RecallMemory):
 
     def __init__(self, message_database=None, restrict_search_to_summaries=False):
         self._message_logs = [] if message_database is None else message_database  # consists of full message dicts
-
-        # If true, the pool of messages that can be queried are the automated summaries only
-        # (generated when the conversation window needs to be shortened)
         self.restrict_search_to_summaries = restrict_search_to_summaries
 
     def __len__(self):
         return len(self._message_logs)
 
+    async def acount(self) -> int:
+        """Async version of count"""
+        return len(self)
+
     def count(self) -> int:
         return len(self)
+
+    async def acompile(self) -> str:
+        """Async version of compile"""
+        system_count = user_count = assistant_count = function_count = other_count = 0
+        for msg in self._message_logs:
+            role = msg["message"]["role"]
+            if role == "system":
+                system_count += 1
+            elif role == "user":
+                user_count += 1
+            elif role == "assistant":
+                assistant_count += 1
+            elif role == "function":
+                function_count += 1
+            else:
+                other_count += 1
+        memory_str = (
+            f"Statistics:"
+            + f"\n{len(self._message_logs)} total messages"
+            + f"\n{system_count} system"
+            + f"\n{user_count} user"
+            + f"\n{assistant_count} assistant"
+            + f"\n{function_count} function"
+            + f"\n{other_count} other"
+        )
+        return f"\n### RECALL MEMORY ###" + f"\n{memory_str}"
 
     def compile(self) -> str:
         # don't dump all the conversations, just statistics
@@ -190,8 +247,36 @@ class DummyRecallMemory(RecallMemory):
         )
         return f"\n### RECALL MEMORY ###" + f"\n{memory_str}"
 
+    async def ainsert(self, message):
+        """Async version of insert"""
+        raise NotImplementedError("This should be handled by the PersistenceManager, recall memory is just a search layer on top")
+
     def insert(self, message):
         raise NotImplementedError("This should be handled by the PersistenceManager, recall memory is just a search layer on top")
+
+    async def atext_search(self, query_string, count=None, start=None):
+        """Async version of text_search"""
+        message_pool = [d for d in self._message_logs if d["message"]["role"] not in ["system", "function"]]
+        start = 0 if start is None else int(start)
+        count = 0 if count is None else int(count)
+
+        printd(
+            f"recall_memory.text_search: searching for {query_string} (c={count}, s={start}) in {len(self._message_logs)} total messages"
+        )
+        matches = [
+            d for d in message_pool if d["message"]["content"] is not None and query_string.lower() in d["message"]["content"].lower()
+        ]
+        printd(f"recall_memory - matches:\n{matches[start:start+count]}")
+
+        # start/count support paging through results
+        if start is not None and count is not None:
+            return matches[start : start + count], len(matches)
+        elif start is None and count is not None:
+            return matches[:count], len(matches)
+        elif start is not None and count is None:
+            return matches[start:], len(matches)
+        else:
+            return matches, len(matches)
 
     def text_search(self, query_string, count=None, start=None):
         # in the dummy version, run an (inefficient) case-insensitive match search
@@ -208,6 +293,37 @@ class DummyRecallMemory(RecallMemory):
         printd(f"recall_memory - matches:\n{matches[start:start+count]}")
 
         # start/count support paging through results
+        if start is not None and count is not None:
+            return matches[start : start + count], len(matches)
+        elif start is None and count is not None:
+            return matches[:count], len(matches)
+        elif start is not None and count is None:
+            return matches[start:], len(matches)
+        else:
+            return matches, len(matches)
+
+    async def adate_search(self, start_date, end_date, count=None, start=None):
+        """Async version of date_search"""
+        message_pool = [d for d in self._message_logs if d["message"]["role"] not in ["system", "function"]]
+
+        # First, validate the start_date and end_date format
+        if not validate_date_format(start_date) or not validate_date_format(end_date):
+            raise ValueError("Invalid date format. Expected format: YYYY-MM-DD")
+
+        # Convert dates to datetime objects for comparison
+        start_date_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
+        end_date_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d")
+
+        # Next, match items inside self._message_logs
+        matches = [
+            d
+            for d in message_pool
+            if start_date_dt <= datetime.datetime.strptime(extract_date_from_timestamp(d["timestamp"]), "%Y-%m-%d") <= end_date_dt
+        ]
+
+        # start/count support paging through results
+        start = 0 if start is None else int(start)
+        count = 0 if count is None else int(count)
         if start is not None and count is not None:
             return matches[start : start + count], len(matches)
         elif start is None and count is not None:
@@ -268,11 +384,27 @@ class BaseRecallMemory(RecallMemory):
         # TODO: have some mechanism for cleanup otherwise will lead to OOM
         self.cache = {}
 
+    async def aget_all(self, start=0, count=None):
+        """Async version of get_all"""
+        start = 0 if start is None else int(start)
+        count = 0 if count is None else int(count)
+        results = await self.storage.get_all(start, count)
+        results_json = [message.to_openai_dict() for message in results]
+        return results_json, len(results)
+
     def get_all(self, start=0, count=None):
         start = 0 if start is None else int(start)
         count = 0 if count is None else int(count)
         results = self.storage.get_all(start, count)
         results_json = [message.to_openai_dict() for message in results]
+        return results_json, len(results)
+
+    async def atext_search(self, query_string, count=None, start=None):
+        """Async version of text_search"""
+        start = 0 if start is None else int(start)
+        count = 0 if count is None else int(count)
+        results = await self.storage.query_text(query_string, count, start)
+        results_json = [message.to_openai_dict_search_results() for message in results]
         return results_json, len(results)
 
     def text_search(self, query_string, count=None, start=None):
@@ -282,12 +414,40 @@ class BaseRecallMemory(RecallMemory):
         results_json = [message.to_openai_dict_search_results() for message in results]
         return results_json, len(results)
 
+    async def adate_search(self, start_date, end_date, count=None, start=None):
+        """Async version of date_search"""
+        start = 0 if start is None else int(start)
+        count = 0 if count is None else int(count)
+        results = await self.storage.query_date(start_date, end_date, count, start)
+        results_json = [message.to_openai_dict_search_results() for message in results]
+        return results_json, len(results)
+
     def date_search(self, start_date, end_date, count=None, start=None):
         start = 0 if start is None else int(start)
         count = 0 if count is None else int(count)
         results = self.storage.query_date(start_date, end_date, count, start)
         results_json = [message.to_openai_dict_search_results() for message in results]
         return results_json, len(results)
+
+    async def acompile(self) -> str:
+        """Async version of compile"""
+        total = await self.storage.size()
+        system_count = await self.storage.size(filters={"role": "system"})
+        user_count = await self.storage.size(filters={"role": "user"})
+        assistant_count = await self.storage.size(filters={"role": "assistant"})
+        function_count = await self.storage.size(filters={"role": "function"})
+        other_count = total - (system_count + user_count + assistant_count + function_count)
+
+        memory_str = (
+            f"Statistics:"
+            + f"\n{total} total messages"
+            + f"\n{system_count} system"
+            + f"\n{user_count} user"
+            + f"\n{assistant_count} assistant"
+            + f"\n{function_count} function"
+            + f"\n{other_count} other"
+        )
+        return f"\n### RECALL MEMORY ###" + f"\n{memory_str}"
 
     def compile(self) -> str:
         total = self.storage.size()
@@ -308,17 +468,36 @@ class BaseRecallMemory(RecallMemory):
         )
         return f"\n### RECALL MEMORY ###" + f"\n{memory_str}"
 
+    async def ainsert(self, message: Message):
+        """Async version of insert"""
+        await self.storage.insert(message)
+
     def insert(self, message: Message):
         self.storage.insert(message)
+
+    async def ainsert_many(self, messages: List[Message]):
+        """Async version of insert_many"""
+        await self.storage.insert_many(messages)
 
     def insert_many(self, messages: List[Message]):
         self.storage.insert_many(messages)
 
+    async def asave(self):
+        """Async version of save"""
+        await self.storage.save()
+
     def save(self):
         self.storage.save()
 
+    async def __len__(self):
+        return await self.storage.size()
+
     def __len__(self):
         return self.storage.size()
+
+    async def acount(self) -> int:
+        """Async version of count"""
+        return await self.storage.size()
 
     def count(self) -> int:
         return len(self)
@@ -328,11 +507,7 @@ class EmbeddingArchivalMemory(ArchivalMemory):
     """Archival memory with embedding based search"""
 
     def __init__(self, agent_state: AgentState, top_k: int = 100):
-        """Init function for archival memory
-
-        :param archival_memory_database: name of dataset to pre-fill archival with
-        :type archival_memory_database: str
-        """
+        """Init function for archival memory"""
         from letta.agent_store.storage import StorageConnector
 
         self.top_k = top_k
@@ -359,13 +534,53 @@ class EmbeddingArchivalMemory(ArchivalMemory):
             embedding_config=self.agent_state.embedding_config,
         )
 
+    async def asave(self):
+        """Save the index to disk asynchronously"""
+        await self.storage.save()
+
     def save(self):
         """Save the index to disk"""
         self.storage.save()
 
+    async def ainsert(self, memory_string, return_ids=False) -> Union[bool, List[str]]:
+        """Embed and save memory string asynchronously"""
+        if not isinstance(memory_string, str):
+            raise TypeError("memory must be a string")
+
+        try:
+            passages = []
+
+            # breakup string into passages
+            for text in parse_and_chunk_text(memory_string, self.embedding_chunk_size):
+                embedding = await self.embed_model.get_text_embedding_async(text)
+                # fixing weird bug where type returned isn't a list, but instead is an object
+                # eg: embedding={'object': 'list', 'data': [{'object': 'embedding', 'embedding': [-0.0071973633, -0.07893023,
+                if isinstance(embedding, dict):
+                    try:
+                        embedding = embedding["data"][0]["embedding"]
+                    except (KeyError, IndexError):
+                        raise TypeError(
+                            f"Got back an unexpected payload from text embedding function, type={type(embedding)}, value={embedding}"
+                        )
+                passages.append(self.create_passage(text, embedding))
+
+            # grab the return IDs before the list gets modified
+            ids = [str(p.id) for p in passages]
+
+            # insert passages
+            await self.storage.insert_many(passages)
+
+            if return_ids:
+                return ids
+            else:
+                return True
+
+        except Exception as e:
+            print("Archival insert error", e)
+            raise e
+
     def insert(self, memory_string, return_ids=False) -> Union[bool, List[str]]:
         """Embed and save memory string"""
-
         if not isinstance(memory_string, str):
             raise TypeError("memory must be a string")
 
@@ -381,7 +596,6 @@ class EmbeddingArchivalMemory(ArchivalMemory):
                     try:
                         embedding = embedding["data"][0]["embedding"]
                     except (KeyError, IndexError):
-                        # TODO as a fallback, see if we can find any lists in the payload
                         raise TypeError(
                             f"Got back an unexpected payload from text embedding function, type={type(embedding)}, value={embedding}"
                         )
@@ -402,6 +616,28 @@ class EmbeddingArchivalMemory(ArchivalMemory):
             print("Archival insert error", e)
             raise e
 
+    async def asearch(self, query_string, count=None, start=None):
+        """Search query string asynchronously"""
+        start = 0 if start is None else int(start)
+        count = self.top_k if count is None else int(count)
+
+        if not isinstance(query_string, str):
+            return TypeError("query must be a string")
+
+        try:
+            if query_string not in self.cache:
+                query_vec = await query_embedding(self.embed_model, query_string)
+                self.cache[query_string] = await self.storage.query(query_string, query_vec, top_k=self.top_k)
+
+            end = min(count + start, len(self.cache[query_string]))
+
+            results = self.cache[query_string][start:end]
+            results = [{"timestamp": get_local_time(), "content": node.text} for node in results]
+            return results, len(results)
+        except Exception as e:
+            print("Archival search error", e)
+            raise e
+
     def search(self, query_string, count=None, start=None):
         """Search query string"""
         start = 0 if start is None else int(start)
@@ -412,7 +648,6 @@ class EmbeddingArchivalMemory(ArchivalMemory):
 
         try:
             if query_string not in self.cache:
-                # self.cache[query_string] = self.retriever.retrieve(query_string)
                 query_vec = query_embedding(self.embed_model, query_string)
                 self.cache[query_string] = self.storage.query(query_string, query_vec, top_k=self.top_k)
 
@@ -425,16 +660,32 @@ class EmbeddingArchivalMemory(ArchivalMemory):
             print("Archival search error", e)
             raise e
 
+    async def acompile(self) -> str:
+        """Convert archival memory into a string representation for a prompt asynchronously"""
+        limit = 10
+        passages = []
+        async for passage in self.storage.get_all_paginated(limit=limit):
+            passages.append(str(passage.text))
+        memory_str = "\n".join(passages)
+        return f"\n### ARCHIVAL MEMORY ###" + f"\n{memory_str}" + f"\nSize: {await self.storage.size()}"
+
     def compile(self) -> str:
         limit = 10
         passages = []
-        for passage in list(self.storage.get_all(limit=limit)):  # TODO: only get first 10
+        for passage in list(self.storage.get_all(limit=limit)):
             passages.append(str(passage.text))
         memory_str = "\n".join(passages)
         return f"\n### ARCHIVAL MEMORY ###" + f"\n{memory_str}" + f"\nSize: {self.storage.size()}"
 
+    async def __len__(self):
+        return await self.storage.size()
+
     def __len__(self):
         return self.storage.size()
+
+    async def acount(self) -> int:
+        """Count the number of memories in the archival memory asynchronously"""
+        return await self.storage.size()
 
     def count(self) -> int:
         return len(self)

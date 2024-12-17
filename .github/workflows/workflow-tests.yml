@@ -1,0 +1,167 @@
+name: Workflow System Tests
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'letta/services/workflow/**'
+      - 'tests/workflow/**'
+      - '.github/workflows/workflow-tests.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'letta/services/workflow/**'
+      - 'tests/workflow/**'
+      - '.github/workflows/workflow-tests.yml'
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11']
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install poetry
+        poetry install
+        
+    - name: Run unit tests
+      run: |
+        poetry run pytest tests/workflow/ -v --asyncio-mode=auto -m "not db and not web and not ws"
+        
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: success() || failure()
+      with:
+        name: unit-test-results-${{ matrix.python-version }}
+        path: |
+          .pytest_cache
+          test-results.xml
+        retention-days: 7
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: test_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    strategy:
+      matrix:
+        python-version: ['3.11']
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install poetry
+        poetry install
+        
+    - name: Start test server
+      run: |
+        poetry run python -m aiohttp.web -H localhost -P 8000 letta.server:init_app &
+        sleep 5  # Wait for server to start
+        
+    - name: Run integration tests
+      env:
+        TEST_DB_URL: postgresql+asyncpg://test_user:test_password@localhost:5432/test_db
+        TEST_WEB_HOST: http://localhost:8000
+      run: |
+        poetry run pytest tests/workflow/ -v --asyncio-mode=auto -m "db or web or ws" \
+          --test-env ci \
+          --db-url $TEST_DB_URL \
+          --web-host $TEST_WEB_HOST
+        
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: success() || failure()
+      with:
+        name: integration-test-results
+        path: |
+          .pytest_cache
+          test-results.xml
+        retention-days: 7
+
+  coverage:
+    needs: [unit-tests, integration-tests]
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install poetry
+        poetry install
+        
+    - name: Generate coverage report
+      run: |
+        poetry run pytest tests/workflow/ --cov=letta.services.workflow --cov-report=xml
+        
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: workflow
+        name: codecov-workflow
+        fail_ci_if_error: true
+
+  replit-tests:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install poetry
+        poetry install
+        
+    - name: Run Replit tests
+      env:
+        REPLIT_DB_URL: ${{ secrets.REPLIT_DB_URL }}
+        REPL_SLUG: ${{ github.event.repository.name }}
+        REPL_OWNER: ${{ github.repository_owner }}
+      run: |
+        poetry run pytest tests/workflow/ -v --asyncio-mode=auto \
+          --test-env replit

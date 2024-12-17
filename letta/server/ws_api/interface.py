@@ -1,5 +1,6 @@
 import asyncio
 import threading
+import json
 
 import letta.server.ws_api.protocol as protocol
 from letta.interface import AgentInterface
@@ -24,32 +25,89 @@ class BaseWebSocketInterface(AgentInterface):
 
 
 class AsyncWebSocketInterface(BaseWebSocketInterface):
-    """WebSocket calls are async"""
-
-    async def user_message(self, msg):
-        """Handle reception of a user message"""
-        # Logic to process the user message and possibly trigger agent's response
-
-    async def internal_monologue(self, msg):
-        """Handle the agent's internal monologue"""
-        print(msg)
-        # Send the internal monologue to all clients
-        if self.clients:  # Check if there are any clients connected
-            await asyncio.gather(*[client.send_text(protocol.server_agent_internal_monologue(msg)) for client in self.clients])
-
-    async def assistant_message(self, msg):
-        """Handle the agent sending a message"""
-        print(msg)
-        # Send the assistant's message to all clients
+    """Async WebSocket interface implementation"""
+    
+    def __init__(self):
+        super().__init__()
+        self.clients = set()
+        self._running = True
+        
+    async def start(self):
+        """Start the WebSocket interface"""
+        self._running = True
+        
+    async def stop(self):
+        """Stop the WebSocket interface"""
+        self._running = False
+        # Close all client connections
         if self.clients:
-            await asyncio.gather(*[client.send_text(protocol.server_agent_assistant_message(msg)) for client in self.clients])
+            await asyncio.gather(*(client.close() for client in self.clients))
+        self.clients.clear()
 
-    async def function_message(self, msg):
-        """Handle the agent calling a function"""
-        print(msg)
-        # Send the function call message to all clients
+    async def add_client(self, websocket):
+        """Add a new client connection"""
+        self.clients.add(websocket)
+        try:
+            async for message in websocket:
+                await self.handle_message(websocket, message)
+        except Exception as e:
+            print(f"Error handling client messages: {e}")
+        finally:
+            self.clients.remove(websocket)
+            await websocket.close()
+
+    async def handle_message(self, websocket, message):
+        """Handle incoming WebSocket messages"""
+        try:
+            data = json.loads(message)
+            msg_type = data.get('type')
+            
+            if msg_type == 'user_message':
+                await self.handle_user_message(websocket, data)
+            elif msg_type == 'system_message':
+                await self.handle_system_message(websocket, data)
+            else:
+                await websocket.send_json({
+                    'type': 'error',
+                    'message': f'Unknown message type: {msg_type}'
+                })
+        except json.JSONDecodeError:
+            await websocket.send_json({
+                'type': 'error',
+                'message': 'Invalid JSON message'
+            })
+        except Exception as e:
+            await websocket.send_json({
+                'type': 'error',
+                'message': f'Error processing message: {str(e)}'
+            })
+
+    async def handle_user_message(self, websocket, data):
+        """Handle user messages"""
+        # Process user message and potentially trigger agent response
+        response = await self.process_user_message(data)
+        await websocket.send_json(response)
+
+    async def handle_system_message(self, websocket, data):
+        """Handle system messages"""
+        # Process system message
+        response = await self.process_system_message(data)
+        await websocket.send_json(response)
+
+    async def broadcast(self, message):
+        """Broadcast a message to all connected clients"""
         if self.clients:
-            await asyncio.gather(*[client.send_text(protocol.server_agent_function_message(msg)) for client in self.clients])
+            await asyncio.gather(*(
+                client.send_json(message) for client in self.clients
+            ))
+
+    async def process_user_message(self, data):
+        """Process a user message and return a response"""
+        raise NotImplementedError
+
+    async def process_system_message(self, data):
+        """Process a system message and return a response"""
+        raise NotImplementedError
 
 
 class SyncWebSocketInterface(BaseWebSocketInterface):

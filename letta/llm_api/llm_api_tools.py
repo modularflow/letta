@@ -100,24 +100,19 @@ def retry_with_exponential_backoff(
 
 
 @retry_with_exponential_backoff
-def create(
-    # agent_state: AgentState,
+async def create(
     llm_config: LLMConfig,
     messages: List[Message],
-    user_id: Optional[str] = None,  # option UUID to associate request with
+    user_id: Optional[str] = None,
     functions: Optional[list] = None,
     functions_python: Optional[dict] = None,
     function_call: str = "auto",
-    # hint
     first_message: bool = False,
-    # use tool naming?
-    # if false, will use deprecated 'functions' style
     use_tool_naming: bool = True,
-    # streaming?
     stream: bool = False,
     stream_interface: Optional[Union[AgentRefreshStreamingInterface, AgentChunkStreamingInterface]] = None,
     max_tokens: Optional[int] = None,
-    model_settings: Optional[dict] = None,  # TODO: eventually pass from server
+    model_settings: Optional[dict] = None,
 ) -> ChatCompletionResponse:
     """Return response to chat completion with backoff"""
     from letta.utils import printd
