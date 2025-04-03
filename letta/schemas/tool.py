@@ -48,7 +48,7 @@ class Tool(BaseTool):
     created_by_id: Optional[str] = Field(None, description="The id of the user that made this Tool.")
     last_updated_by_id: Optional[str] = Field(None, description="The id of the user that made this Tool.")
 
-    def to_dict(self):
+    async def to_dict(self):
         """
         Convert tool into OpenAI representation.
         """

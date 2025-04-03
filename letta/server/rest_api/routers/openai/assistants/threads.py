@@ -29,7 +29,7 @@ from letta.server.rest_api.routers.openai.assistants.schemas import (
     SubmitToolOutputsToRunRequest,
 )
 from letta.server.rest_api.utils import get_letta_server
-from letta.server.server import SyncServer
+from letta.server.server import AsyncServer
 
 if TYPE_CHECKING:
     from letta.utils import get_utc_time
@@ -42,7 +42,7 @@ router = APIRouter(prefix="/v1/threads", tags=["threads"])
 @router.post("/", response_model=OpenAIThread)
 def create_thread(
     request: CreateThreadRequest = Body(...),
-    server: SyncServer = Depends(get_letta_server),
+    server: AsyncServer = Depends(get_letta_server),
     user_id: Optional[str] = Header(None, alias="user_id"),  # Extract user_id from header, default to None if not present
 ):
     # TODO: use requests.description and requests.metadata fields
@@ -67,7 +67,7 @@ def create_thread(
 @router.get("/{thread_id}", response_model=OpenAIThread)
 def retrieve_thread(
     thread_id: str = Path(..., description="The unique identifier of the thread."),
-    server: SyncServer = Depends(get_letta_server),
+    server: AsyncServer = Depends(get_letta_server),
     user_id: Optional[str] = Header(None, alias="user_id"),  # Extract user_id from header, default to None if not present
 ):
     actor = server.get_user_or_default(user_id=user_id)
@@ -101,7 +101,7 @@ def delete_thread(
 def create_message(
     thread_id: str = Path(..., description="The unique identifier of the thread."),
     request: CreateMessageRequest = Body(...),
-    server: SyncServer = Depends(get_letta_server),
+    server: AsyncServer = Depends(get_letta_server),
     user_id: Optional[str] = Header(None, alias="user_id"),  # Extract user_id from header, default to None if not present
 ):
     actor = server.get_user_or_default(user_id=user_id)
@@ -145,7 +145,7 @@ def list_messages(
     order: str = Query("asc", description="Order of messages to retrieve (either 'asc' or 'desc')."),
     after: str = Query(None, description="A cursor for use in pagination. `after` is an object ID that defines your place in the list."),
     before: str = Query(None, description="A cursor for use in pagination. `after` is an object ID that defines your place in the list."),
-    server: SyncServer = Depends(get_letta_server),
+    server: AsyncServer = Depends(get_letta_server),
     user_id: Optional[str] = Header(None, alias="user_id"),  # Extract user_id from header, default to None if not present
 ):
     actor = server.get_user_or_default(user_id)
@@ -196,7 +196,7 @@ def list_messages(
 def retrieve_message(
     thread_id: str = Path(..., description="The unique identifier of the thread."),
     message_id: str = Path(..., description="The unique identifier of the message."),
-    server: SyncServer = Depends(get_letta_server),
+    server: AsyncServer = Depends(get_letta_server),
 ):
     agent_id = thread_id
     message = server.get_agent_message(agent_id=agent_id, message_id=message_id)
@@ -241,7 +241,7 @@ def modify_message(
 def create_run(
     thread_id: str = Path(..., description="The unique identifier of the thread."),
     request: CreateRunRequest = Body(...),
-    server: SyncServer = Depends(get_letta_server),
+    server: AsyncServer = Depends(get_letta_server),
 ):
 
     # TODO: add request.instructions as a message?

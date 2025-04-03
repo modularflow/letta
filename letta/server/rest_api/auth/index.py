@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from letta.log import get_logger
 from letta.server.rest_api.interface import QueuingInterface
-from letta.server.server import SyncServer
+from letta.server.server import AsyncServer
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -21,10 +21,10 @@ class AuthRequest(BaseModel):
     password: str = Field(None, description="Admin password provided when starting the Letta server")
 
 
-def setup_auth_router(server: SyncServer, interface: QueuingInterface, password: str) -> APIRouter:
+def setup_auth_router(server: AsyncServer, interface: QueuingInterface, password: str) -> APIRouter:
 
     @router.post("/auth", tags=["auth"], response_model=AuthResponse)
-    def authenticate_user(request: AuthRequest) -> AuthResponse:
+    async def authenticate_user(request: AuthRequest) -> AuthResponse:
         """
         Authenticates the user and sends response with User related data.
 

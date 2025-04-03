@@ -48,9 +48,9 @@ from letta.schemas.source import Source, SourceCreate, SourceUpdate
 from letta.schemas.tool import Tool, ToolCreate, ToolUpdate
 from letta.schemas.tool_rule import BaseToolRule
 from letta.server.rest_api.interface import QueuingInterface
-from letta.server.server import SyncServer
+from letta.server.server import AsyncServer
 from letta.utils import get_human_text, get_persona_text
-from letta.utils.http_client import make_async_request, make_async_post_request, make_async_delete_request
+from letta.http_client import make_async_request, make_async_post_request, make_async_delete_request
 
 
 def create_client(base_url: Optional[str] = None, token: Optional[str] = None):
@@ -397,7 +397,7 @@ class RESTClient(AbstractClient):
         if include_base_tools:
             tool_names += BASE_TOOLS
 
-        memory_functions = get_memory_functions(memory)
+        memory_functions = await get_memory_functions(memory)
         for func_name, func in memory_functions.items():
             tool = await self.acreate_tool(func, name=func_name, tags=["memory", "letta-base"])
             tool_names.append(tool.name)
@@ -548,75 +548,26 @@ class RESTClient(AbstractClient):
         description: Optional[str] = None,
         initial_message_sequence: Optional[List[Message]] = None,
     ) -> AgentState:
-        """Create an agent
-
-        Args:
-            name (str): Name of the agent
-            embedding_config (EmbeddingConfig): Embedding configuration
-            llm_config (LLMConfig): LLM configuration
-            memory (Memory): Memory configuration
-            system (str): System configuration
-            tools (List[str]): List of tools
-            include_base_tools (bool): Include base tools
-            metadata (Dict): Metadata
-            description (str): Description
-
-        Returns:
-            agent_state (AgentState): State of the created agent
-        """
-
-        # TODO: implement this check once name lookup works
-        # if name:
-        #    exist_agent_id = self.get_agent_id(agent_name=name)
-
-        #    raise ValueError(f"Agent with name {name} already exists")
-
-        # construct list of tools
-        tool_names = []
-        if tools:
-            tool_names += tools
-        if include_base_tools:
-            tool_names += BASE_TOOLS
-
-        # add memory tools
-        memory_functions = get_memory_functions(memory)
-        for func_name, func in memory_functions.items():
-            tool = self.create_tool(func, name=func_name, tags=["memory", "letta-base"])
-            tool_names.append(tool.name)
-
-        # check if default configs are provided
-        assert embedding_config or self._default_embedding_config, f"Embedding config must be provided"
-        assert llm_config or self._default_llm_config, f"LLM config must be provided"
-
-        # create agent
-        request = CreateAgent(
+        """Synchronous wrapper for acreate_agent"""
+        import asyncio
+        
+        # Run the async version in an event loop
+        return asyncio.run(self.acreate_agent(
             name=name,
-            description=description,
-            metadata_=metadata,
-            memory=memory,
-            tools=tool_names,
-            tool_rules=tool_rules,
-            system=system,
             agent_type=agent_type,
-            llm_config=llm_config if llm_config else self._default_llm_config,
-            embedding_config=embedding_config if embedding_config else self._default_embedding_config,
-            initial_message_sequence=initial_message_sequence,
-        )
+            embedding_config=embedding_config,
+            llm_config=llm_config,
+            memory=memory,
+            system=system,
+            tools=tools,
+            tool_rules=tool_rules,
+            include_base_tools=include_base_tools,
+            metadata=metadata,
+            description=description,
+            initial_message_sequence=initial_message_sequence
+        ))
 
-        # Use model_dump_json() instead of model_dump()
-        # If we use model_dump(), the datetime objects will not be serialized correctly
-        # response = requests.post(f"{self.base_url}/{self.api_prefix}/agents", json=request.model_dump(), headers=self.headers)
-        response = requests.post(
-            f"{self.base_url}/{self.api_prefix}/agents",
-            data=request.model_dump_json(),  # Use model_dump_json() instead of json=model_dump()
-            headers={"Content-Type": "application/json", **self.headers},
-        )
-
-        if response.status_code != 200:
-            raise ValueError(f"Status {response.status_code} - Failed to create agent: {response.text}")
-        return AgentState(**response.json())
-
-    def update_message(
+    async def update_message(
         self,
         agent_id: str,
         message_id: str,
@@ -626,22 +577,20 @@ class RESTClient(AbstractClient):
         tool_calls: Optional[List[ToolCall]] = None,
         tool_call_id: Optional[str] = None,
     ) -> Message:
-        request = UpdateMessage(
-            id=message_id,
-            role=role,
-            text=text,
-            name=name,
-            tool_calls=tool_calls,
-            tool_call_id=tool_call_id,
+        message = self.server.update_agent_message(
+            agent_id=agent_id,
+            request=UpdateMessage(
+                id=message_id,
+                role=role,
+                text=text,
+                name=name,
+                tool_calls=tool_calls,
+                tool_call_id=tool_call_id,
+            ),
         )
-        response = requests.patch(
-            f"{self.base_url}/{self.api_prefix}/agents/{agent_id}/messages/{message_id}", json=request.model_dump(), headers=self.headers
-        )
-        if response.status_code != 200:
-            raise ValueError(f"Failed to update message: {response.text}")
-        return Message(**response.json())
+        return message
 
-    def update_agent(
+    async def update_agent(
         self,
         agent_id: str,
         name: Optional[str] = None,
@@ -673,23 +622,24 @@ class RESTClient(AbstractClient):
         Returns:
             agent_state (AgentState): State of the updated agent
         """
-        request = UpdateAgentState(
-            id=agent_id,
-            name=name,
-            system=system,
-            tools=tools,
-            tags=tags,
-            description=description,
-            metadata_=metadata,
-            llm_config=llm_config,
-            embedding_config=embedding_config,
-            message_ids=message_ids,
-            memory=memory,
+        self.interface.clear()
+        agent_state = self.server.update_agent(
+            UpdateAgentState(
+                id=agent_id,
+                name=name,
+                system=system,
+                tools=tools,
+                tags=tags,
+                description=description,
+                metadata_=metadata,
+                llm_config=llm_config,
+                embedding_config=embedding_config,
+                message_ids=message_ids,
+                memory=memory,
+            ),
+            actor=self.user,
         )
-        response = requests.patch(f"{self.base_url}/{self.api_prefix}/agents/{agent_id}", json=request.model_dump(), headers=self.headers)
-        if response.status_code != 200:
-            raise ValueError(f"Failed to update agent: {response.text}")
-        return AgentState(**response.json())
+        return agent_state
 
     def get_tools_from_agent(self, agent_id: str) -> List[Tool]:
         """
@@ -1500,7 +1450,7 @@ class RESTClient(AbstractClient):
 
     def create_tool(
         self,
-        func: Callable,
+        func,
         name: Optional[str] = None,
         tags: Optional[List[str]] = None,
     ) -> Tool:
@@ -2085,7 +2035,7 @@ class LocalClient(AbstractClient):
         user_id (str): The user ID.
         debug (bool): Whether to print debug information.
         interface (QueuingInterface): The interface for the client.
-        server (SyncServer): The server for the client.
+        server (AsyncServer): The server for the client.
     """
 
     def __init__(
@@ -2117,7 +2067,7 @@ class LocalClient(AbstractClient):
 
         # create server
         self.interface = QueuingInterface(debug=debug)
-        self.server = SyncServer(default_interface_factory=lambda: self.interface)
+        self.server = AsyncServer(default_interface_factory=lambda: self.interface)
 
         # save org_id that `LocalClient` is associated with
         if org_id:
@@ -2131,16 +2081,56 @@ class LocalClient(AbstractClient):
             # get default user
             self.user_id = self.server.user_manager.DEFAULT_USER_ID
 
-        self.user = self.server.get_user_or_default(self.user_id)
-        self.organization = self.server.get_organization_or_default(self.org_id)
+        # Initialize user and organization to None, they will be properly set in initialize
+        self.user = None
+        self.organization = None
+        
+    async def initialize(self):
+        """Async initialization to be called after creating the client instance"""
+        self.user = await self.server.get_user_or_default(self.user_id)
+        self.organization = await self.server.get_organization_or_default(self.org_id)
+        return self
+        
+    @classmethod
+    async def create(
+        cls,
+        auto_save: bool = False,
+        user_id: Optional[str] = None,
+        org_id: Optional[str] = None,
+        debug: bool = False,
+        default_llm_config: Optional[LLMConfig] = None,
+        default_embedding_config: Optional[EmbeddingConfig] = None,
+    ):
+        """
+        Async factory method to create and initialize a LocalClient
+        
+        Args:
+            auto_save (bool): Whether to automatically save changes.
+            user_id (str): The user ID.
+            org_id (str): The organization ID.
+            debug (bool): Whether to print debug information.
+            default_llm_config (LLMConfig): Default LLM configuration.
+            default_embedding_config (EmbeddingConfig): Default embedding configuration.
+            
+        Returns:
+            LocalClient: An initialized LocalClient instance
+        """
+        client = cls(
+            auto_save=auto_save,
+            user_id=user_id,
+            org_id=org_id,
+            debug=debug,
+            default_llm_config=default_llm_config,
+            default_embedding_config=default_embedding_config,
+        )
+        return await client.initialize()
 
     # agents
-    def list_agents(self, tags: Optional[List[str]] = None) -> List[AgentState]:
+    async def list_agents(self, tags: Optional[List[str]] = None) -> List[AgentState]:
         self.interface.clear()
+        return await self.server.list_agents(user_id=self.user_id, tags=tags)
 
-        return self.server.list_agents(user_id=self.user_id, tags=tags)
-
-    def agent_exists(self, agent_id: Optional[str] = None, agent_name: Optional[str] = None) -> bool:
+    async def agent_exists(self, agent_id: Optional[str] = None, agent_name: Optional[str] = None) -> bool:
         """
         Check if an agent exists
 
@@ -2156,92 +2146,97 @@ class LocalClient(AbstractClient):
             raise ValueError(f"Either agent_id or agent_name must be provided")
         if agent_id and agent_name:
             raise ValueError(f"Only one of agent_id or agent_name can be provided")
-        existing = self.list_agents()
+        existing = await self.list_agents()
         if agent_id:
             return str(agent_id) in [str(agent.id) for agent in existing]
         else:
             return agent_name in [str(agent.name) for agent in existing]
 
-    def create_agent(
+    async def acreate_agent(
         self,
         name: Optional[str] = None,
-        # agent config
         agent_type: Optional[AgentType] = AgentType.memgpt_agent,
-        # model configs
-        embedding_config: EmbeddingConfig = None,
-        llm_config: LLMConfig = None,
-        # memory
+        embedding_config: Optional[EmbeddingConfig] = None,
+        llm_config: Optional[LLMConfig] = None,
         memory: Memory = ChatMemory(human=get_human_text(DEFAULT_HUMAN), persona=get_persona_text(DEFAULT_PERSONA)),
-        # system
         system: Optional[str] = None,
-        # tools
         tools: Optional[List[str]] = None,
         tool_rules: Optional[List[BaseToolRule]] = None,
         include_base_tools: Optional[bool] = True,
-        # metadata
         metadata: Optional[Dict] = {"human:": DEFAULT_HUMAN, "persona": DEFAULT_PERSONA},
         description: Optional[str] = None,
         initial_message_sequence: Optional[List[Message]] = None,
     ) -> AgentState:
-        """Create an agent
-
-        Args:
-            name (str): Name of the agent
-            embedding_config (EmbeddingConfig): Embedding configuration
-            llm_config (LLMConfig): LLM configuration
-            memory (Memory): Memory configuration
-            system (str): System configuration
-            tools (List[str]): List of tools
-            include_base_tools (bool): Include base tools
-            metadata (Dict): Metadata
-            description (str): Description
-
-        Returns:
-            agent_state (AgentState): State of the created agent
-        """
-
-        if name and self.agent_exists(agent_name=name):
-            raise ValueError(f"Agent with name {name} already exists (user_id={self.user_id})")
-
-        # construct list of tools
+        """Async version of create_agent"""
         tool_names = []
         if tools:
             tool_names += tools
         if include_base_tools:
             tool_names += BASE_TOOLS
 
-        # add memory tools
-        memory_functions = get_memory_functions(memory)
+        memory_functions = await get_memory_functions(memory)
         for func_name, func in memory_functions.items():
-            tool = self.create_tool(func, name=func_name, tags=["memory", "letta-base"])
+            tool = await self.acreate_tool(func, name=func_name, tags=["memory", "letta-base"])
             tool_names.append(tool.name)
 
-        self.interface.clear()
+        assert embedding_config or self._default_embedding_config, "Embedding config must be provided"
+        assert llm_config or self._default_llm_config, "LLM config must be provided"
 
-        # check if default configs are provided
-        assert embedding_config or self._default_embedding_config, f"Embedding config must be provided"
-        assert llm_config or self._default_llm_config, f"LLM config must be provided"
-
-        # create agent
-        agent_state = self.server.create_agent(
-            CreateAgent(
-                name=name,
-                description=description,
-                metadata_=metadata,
-                memory=memory,
-                tools=tool_names,
-                tool_rules=tool_rules,
-                system=system,
-                agent_type=agent_type,
-                llm_config=llm_config if llm_config else self._default_llm_config,
-                embedding_config=embedding_config if embedding_config else self._default_embedding_config,
-                initial_message_sequence=initial_message_sequence,
-            ),
-            actor=self.user,
+        request = CreateAgent(
+            name=name,
+            description=description,
+            metadata_=metadata,
+            memory=memory,
+            tools=tool_names,
+            tool_rules=tool_rules,
+            system=system,
+            agent_type=agent_type,
+            llm_config=llm_config if llm_config else self._default_llm_config,
+            embedding_config=embedding_config if embedding_config else self._default_embedding_config,
+            initial_message_sequence=initial_message_sequence,
         )
-        return agent_state
 
-    def update_message(
+        response = await make_async_post_request(
+            f"{self.base_url}/{self.api_prefix}/agents",
+            headers=self.headers,
+            json_data=request.model_dump()
+        )
+        return AgentState(**response)
+
+    async def create_agent(
+        self,
+        name: Optional[str] = None,
+        agent_type: Optional[AgentType] = AgentType.memgpt_agent,
+        embedding_config: Optional[EmbeddingConfig] = None,
+        llm_config: Optional[LLMConfig] = None,
+        memory: Memory = ChatMemory(human=get_human_text(DEFAULT_HUMAN), persona=get_persona_text(DEFAULT_PERSONA)),
+        system: Optional[str] = None,
+        tools: Optional[List[str]] = None,
+        tool_rules: Optional[List[BaseToolRule]] = None,
+        include_base_tools: Optional[bool] = True,
+        metadata: Optional[Dict] = {"human:": DEFAULT_HUMAN, "persona": DEFAULT_PERSONA},
+        description: Optional[str] = None,
+        initial_message_sequence: Optional[List[Message]] = None,
+    ) -> AgentState:
+        """Synchronous wrapper for acreate_agent"""
+        import asyncio
+        
+        return asyncio.run(self.acreate_agent(
+            name=name,
+            agent_type=agent_type,
+            embedding_config=embedding_config,
+            llm_config=llm_config,
+            memory=memory,
+            system=system,
+            tools=tools,
+            tool_rules=tool_rules,
+            include_base_tools=include_base_tools,
+            metadata=metadata,
+            description=description,
+            initial_message_sequence=initial_message_sequence
+        ))
+
+    async def update_message(
         self,
         agent_id: str,
         message_id: str,
@@ -2251,7 +2246,7 @@ class LocalClient(AbstractClient):
         tool_calls: Optional[List[ToolCall]] = None,
         tool_call_id: Optional[str] = None,
     ) -> Message:
-        message = self.server.update_agent_message(
+        message = await self.server.update_agent_message(
             agent_id=agent_id,
             request=UpdateMessage(
                 id=message_id,
@@ -2264,7 +2259,7 @@ class LocalClient(AbstractClient):
         )
         return message
 
-    def update_agent(
+    async def update_agent(
         self,
         agent_id: str,
         name: Optional[str] = None,
@@ -2297,7 +2292,7 @@ class LocalClient(AbstractClient):
             agent_state (AgentState): State of the updated agent
         """
         self.interface.clear()
-        agent_state = self.server.update_agent(
+        agent_state = await self.server.update_agent(
             UpdateAgentState(
                 id=agent_id,
                 name=name,
@@ -2315,7 +2310,7 @@ class LocalClient(AbstractClient):
         )
         return agent_state
 
-    def get_tools_from_agent(self, agent_id: str) -> List[Tool]:
+    async def get_tools_from_agent(self, agent_id: str) -> List[Tool]:
         """
         Get tools from an existing agent.
 
@@ -2326,9 +2321,9 @@ class LocalClient(AbstractClient):
             List[Tool]: A list of Tool objs
         """
         self.interface.clear()
-        return self.server.get_tools_from_agent(agent_id=agent_id, user_id=self.user_id)
+        return await self.server.get_tools_from_agent(agent_id=agent_id, user_id=self.user_id)
 
-    def add_tool_to_agent(self, agent_id: str, tool_id: str):
+    async def add_tool_to_agent(self, agent_id: str, tool_id: str):
         """
         Add tool to an existing agent
 
@@ -2340,10 +2335,10 @@ class LocalClient(AbstractClient):
             agent_state (AgentState): State of the updated agent
         """
         self.interface.clear()
-        agent_state = self.server.add_tool_to_agent(agent_id=agent_id, tool_id=tool_id, user_id=self.user_id)
+        agent_state = await self.server.add_tool_to_agent(agent_id=agent_id, tool_id=tool_id, user_id=self.user_id)
         return agent_state
 
-    def remove_tool_from_agent(self, agent_id: str, tool_id: str):
+    async def remove_tool_from_agent(self, agent_id: str, tool_id: str):
         """
         Removes tools from an existing agent
 
@@ -2355,10 +2350,10 @@ class LocalClient(AbstractClient):
             agent_state (AgentState): State of the updated agent
         """
         self.interface.clear()
-        agent_state = self.server.remove_tool_from_agent(agent_id=agent_id, tool_id=tool_id, user_id=self.user_id)
+        agent_state = await self.server.remove_tool_from_agent(agent_id=agent_id, tool_id=tool_id, user_id=self.user_id)
         return agent_state
 
-    def rename_agent(self, agent_id: str, new_name: str):
+    async def rename_agent(self, agent_id: str, new_name: str):
         """
         Rename an agent
 
@@ -2366,18 +2361,18 @@ class LocalClient(AbstractClient):
             agent_id (str): ID of the agent
             new_name (str): New name for the agent
         """
-        self.update_agent(agent_id, name=new_name)
+        await self.update_agent(agent_id, name=new_name)
 
-    def delete_agent(self, agent_id: str):
+    async def delete_agent(self, agent_id: str):
         """
         Delete an agent
 
         Args:
             agent_id (str): ID of the agent to delete
         """
-        self.server.delete_agent(user_id=self.user_id, agent_id=agent_id)
+        await self.server.delete_agent(user_id=self.user_id, agent_id=agent_id)
 
-    def get_agent_by_name(self, agent_name: str) -> AgentState:
+    async def get_agent_by_name(self, agent_name: str) -> AgentState:
         """
         Get an agent by its name
 
@@ -2388,9 +2383,9 @@ class LocalClient(AbstractClient):
             agent_state (AgentState): State of the agent
         """
         self.interface.clear()
-        return self.server.get_agent_state(agent_name=agent_name, user_id=self.user_id, agent_id=None)
+        return await self.server.get_agent_state(agent_name=agent_name, user_id=self.user_id, agent_id=None)
 
-    def get_agent(self, agent_id: str) -> AgentState:
+    async def get_agent(self, agent_id: str) -> AgentState:
         """
         Get an agent's state by its ID.
 
@@ -2402,9 +2397,9 @@ class LocalClient(AbstractClient):
         """
         # TODO: include agent_name
         self.interface.clear()
-        return self.server.get_agent_state(user_id=self.user_id, agent_id=agent_id)
+        return await self.server.get_agent_state(user_id=self.user_id, agent_id=agent_id)
 
-    def get_agent_id(self, agent_name: str) -> Optional[str]:
+    async def get_agent_id(self, agent_name: str) -> Optional[str]:
         """
         Get the ID of an agent by name (names are unique per user)
 
@@ -2417,10 +2412,10 @@ class LocalClient(AbstractClient):
 
         self.interface.clear()
         assert agent_name, f"Agent name must be provided"
-        return self.server.get_agent_id(name=agent_name, user_id=self.user_id)
+        return await self.server.get_agent_id(name=agent_name, user_id=self.user_id)
 
     # memory
-    def get_in_context_memory(self, agent_id: str) -> Memory:
+    async def get_in_context_memory(self, agent_id: str) -> Memory:
         """
         Get the in-context (i.e. core) memory of an agent
 
@@ -2430,13 +2425,13 @@ class LocalClient(AbstractClient):
         Returns:
             memory (Memory): In-context memory of the agent
         """
-        memory = self.server.get_agent_memory(agent_id=agent_id)
+        memory = await self.server.get_agent_memory(agent_id=agent_id)
         return memory
 
-    def get_core_memory(self, agent_id: str) -> Memory:
-        return self.get_in_context_memory(agent_id)
+    async def get_core_memory(self, agent_id: str) -> Memory:
+        return await self.get_in_context_memory(agent_id)
 
-    def update_in_context_memory(self, agent_id: str, section: str, value: Union[List[str], str]) -> Memory:
+    async def update_in_context_memory(self, agent_id: str, section: str, value: Union[List[str], str]) -> Memory:
         """
         Update the in-context memory of an agent
 
@@ -2448,10 +2443,10 @@ class LocalClient(AbstractClient):
 
         """
         # TODO: implement this (not sure what it should look like)
-        memory = self.server.update_agent_core_memory(user_id=self.user_id, agent_id=agent_id, new_memory_contents={section: value})
+        memory = await self.server.update_agent_core_memory(user_id=self.user_id, agent_id=agent_id, new_memory_contents={section: value})
         return memory
 
-    def get_archival_memory_summary(self, agent_id: str) -> ArchivalMemorySummary:
+    async def get_archival_memory_summary(self, agent_id: str) -> ArchivalMemorySummary:
         """
         Get a summary of the archival memory of an agent
 
@@ -2462,9 +2457,9 @@ class LocalClient(AbstractClient):
             summary (ArchivalMemorySummary): Summary of the archival memory
 
         """
-        return self.server.get_archival_memory_summary(agent_id=agent_id)
+        return await self.server.get_archival_memory_summary(agent_id=agent_id)
 
-    def get_recall_memory_summary(self, agent_id: str) -> RecallMemorySummary:
+    async def get_recall_memory_summary(self, agent_id: str) -> RecallMemorySummary:
         """
         Get a summary of the recall memory of an agent
 
@@ -2474,9 +2469,9 @@ class LocalClient(AbstractClient):
         Returns:
             summary (RecallMemorySummary): Summary of the recall memory
         """
-        return self.server.get_recall_memory_summary(agent_id=agent_id)
+        return await self.server.get_recall_memory_summary(agent_id=agent_id)
 
-    def get_in_context_messages(self, agent_id: str) -> List[Message]:
+    async def get_in_context_messages(self, agent_id: str) -> List[Message]:
         """
         Get in-context messages of an agent
 
@@ -2486,11 +2481,11 @@ class LocalClient(AbstractClient):
         Returns:
             messages (List[Message]): List of in-context messages
         """
-        return self.server.get_in_context_messages(agent_id=agent_id)
+        return await self.server.get_in_context_messages(agent_id=agent_id)
 
     # agent interactions
 
-    def send_messages(
+    async def send_messages(
         self,
         agent_id: str,
         messages: List[Union[Message | MessageCreate]],
@@ -2507,11 +2502,11 @@ class LocalClient(AbstractClient):
             response (LettaResponse): Response from the agent
         """
         self.interface.clear()
-        usage = self.server.send_messages(user_id=self.user_id, agent_id=agent_id, messages=messages)
+        usage = await self.server.send_messages(user_id=self.user_id, agent_id=agent_id, messages=messages)
 
         # auto-save
         if self.auto_save:
-            self.save()
+            await self.save()
 
         # format messages
         messages = self.interface.to_list()
@@ -2524,7 +2519,7 @@ class LocalClient(AbstractClient):
 
         return LettaResponse(messages=letta_messages, usage=usage)
 
-    def send_message(
+    async def send_message(
         self,
         message: str,
         role: str,
@@ -2551,7 +2546,7 @@ class LocalClient(AbstractClient):
         if not agent_id:
             # lookup agent by name
             assert agent_name, f"Either agent_id or agent_name must be provided"
-            agent_id = self.get_agent_id(agent_name=agent_name)
+            agent_id = await self.get_agent_id(agent_name=agent_name)
             assert agent_id, f"Agent with name {agent_name} not found"
 
         if stream_steps or stream_tokens:
@@ -2559,7 +2554,7 @@ class LocalClient(AbstractClient):
             raise NotImplementedError
         self.interface.clear()
 
-        usage = self.server.send_messages(
+        usage = await self.server.send_messages(
             user_id=self.user_id,
             agent_id=agent_id,
             messages=[MessageCreate(role=MessageRole(role), text=message, name=name)],
@@ -2567,7 +2562,7 @@ class LocalClient(AbstractClient):
 
         # auto-save
         if self.auto_save:
-            self.save()
+            await self.save()
 
         ## TODO: need to make sure date/timestamp is propely passed
         ## TODO: update self.interface.to_list() to return actual Message objects
@@ -2591,7 +2586,7 @@ class LocalClient(AbstractClient):
 
         return LettaResponse(messages=letta_messages, usage=usage)
 
-    def user_message(self, agent_id: str, message: str, include_full_message: Optional[bool] = False) -> LettaResponse:
+    async def user_message(self, agent_id: str, message: str, include_full_message: Optional[bool] = False) -> LettaResponse:
         """
         Send a message to an agent as a user
 
@@ -2603,9 +2598,9 @@ class LocalClient(AbstractClient):
             response (LettaResponse): Response from the agent
         """
         self.interface.clear()
-        return self.send_message(role="user", agent_id=agent_id, message=message, include_full_message=include_full_message)
+        return await self.send_message(role="user", agent_id=agent_id, message=message, include_full_message=include_full_message)
 
-    def run_command(self, agent_id: str, command: str) -> LettaResponse:
+    async def run_command(self, agent_id: str, command: str) -> LettaResponse:
         """
         Run a command on the agent
 
@@ -2618,30 +2613,29 @@ class LocalClient(AbstractClient):
 
         """
         self.interface.clear()
-        usage = self.server.run_command(user_id=self.user_id, agent_id=agent_id, command=command)
+        usage = await self.server.run_command(user_id=self.user_id, agent_id=agent_id, command=command)
 
         # auto-save
         if self.auto_save:
-            self.save()
+            await self.save()
 
         # NOTE: messages/usage may be empty, depending on the command
         return LettaResponse(messages=self.interface.to_list(), usage=usage)
 
-    def save(self):
-        self.server.save_agents()
+    async def save(self):
+        await self.server.save_agents()
 
     # archival memory
 
     # humans / personas
 
-    def get_block_id(self, name: str, label: str) -> str:
-
-        block = self.server.get_blocks(name=name, label=label, user_id=self.user_id, template=True)
+    async def get_block_id(self, name: str, label: str) -> str:
+        block = await self.server.get_blocks(name=name, label=label, user_id=self.user_id, template=True)
         if not block:
             return None
         return block[0].id
 
-    def create_human(self, name: str, text: str):
+    async def create_human(self, name: str, text: str):
         """
         Create a human block template (saved human string to pre-fill `ChatMemory`)
 
@@ -2652,9 +2646,9 @@ class LocalClient(AbstractClient):
         Returns:
             human (Human): Human block
         """
-        return self.server.create_block(CreateHuman(template_name=name, value=text, user_id=self.user_id), user_id=self.user_id)
+        return await self.server.create_block(CreateHuman(template_name=name, value=text, user_id=self.user_id), user_id=self.user_id)
 
-    def create_persona(self, name: str, text: str):
+    async def create_persona(self, name: str, text: str):
         """
         Create a persona block template (saved persona string to pre-fill `ChatMemory`)
 
@@ -2665,27 +2659,27 @@ class LocalClient(AbstractClient):
         Returns:
             persona (Persona): Persona block
         """
-        return self.server.create_block(CreatePersona(template_name=name, value=text, user_id=self.user_id), user_id=self.user_id)
+        return await self.server.create_block(CreatePersona(template_name=name, value=text, user_id=self.user_id), user_id=self.user_id)
 
-    def list_humans(self):
+    async def list_humans(self):
         """
         List available human block templates
 
         Returns:
             humans (List[Human]): List of human blocks
         """
-        return self.server.get_blocks(label="human", user_id=self.user_id, template=True)
+        return await self.server.get_blocks(label="human", user_id=self.user_id, template=True)
 
-    def list_personas(self) -> List[Persona]:
+    async def list_personas(self) -> List[Persona]:
         """
         List available persona block templates
 
         Returns:
             personas (List[Persona]): List of persona blocks
         """
-        return self.server.get_blocks(label="persona", user_id=self.user_id, template=True)
+        return await self.server.get_blocks(label="persona", user_id=self.user_id, template=True)
 
-    def update_human(self, human_id: str, text: str):
+    async def update_human(self, human_id: str, name: Optional[str] = None, text: Optional[str] = None) -> Human:
         """
         Update a human block template
 
@@ -2696,9 +2690,13 @@ class LocalClient(AbstractClient):
         Returns:
             human (Human): Updated human block
         """
-        return self.server.update_block(UpdateHuman(id=human_id, value=text, user_id=self.user_id, template=True))
+        request = UpdateHuman(id=human_id, template_name=name, value=text)
+        response = requests.post(f"{self.base_url}/{self.api_prefix}/blocks/{human_id}", json=request.model_dump(), headers=self.headers)
+        if response.status_code != 200:
+            raise ValueError(f"Failed to update human: {response.text}")
+        return Human(**response.json())
 
-    def update_persona(self, persona_id: str, text: str):
+    async def update_persona(self, persona_id: str, name: Optional[str] = None, text: Optional[str] = None) -> Persona:
         """
         Update a persona block template
 
@@ -2709,9 +2707,13 @@ class LocalClient(AbstractClient):
         Returns:
             persona (Persona): Updated persona block
         """
-        return self.server.update_block(UpdatePersona(id=persona_id, value=text, user_id=self.user_id, template=True))
+        request = UpdatePersona(id=persona_id, template_name=name, value=text)
+        response = requests.post(f"{self.base_url}/{self.api_prefix}/blocks/{persona_id}", json=request.model_dump(), headers=self.headers)
+        if response.status_code != 200:
+            raise ValueError(f"Failed to update persona: {response.text}")
+        return Persona(**response.json())
 
-    def get_persona(self, id: str) -> Persona:
+    async def get_persona(self, persona_id: str) -> Persona:
         """
         Get a persona block template
 
@@ -2721,23 +2723,9 @@ class LocalClient(AbstractClient):
         Returns:
             persona (Persona): Persona block
         """
-        assert id, f"Persona ID must be provided"
-        return Persona(**self.server.get_block(id).model_dump())
+        return self.get_block(persona_id)
 
-    def get_human(self, id: str) -> Human:
-        """
-        Get a human block template
-
-        Args:
-            id (str): ID of the human block
-
-        Returns:
-            human (Human): Human block
-        """
-        assert id, f"Human ID must be provided"
-        return Human(**self.server.get_block(id).model_dump())
-
-    def get_persona_id(self, name: str) -> str:
+    async def get_persona_id(self, name: str) -> str:
         """
         Get the ID of a persona block template
 
@@ -2747,12 +2735,30 @@ class LocalClient(AbstractClient):
         Returns:
             id (str): ID of the persona block
         """
-        persona = self.server.get_blocks(name=name, label="persona", user_id=self.user_id, template=True)
-        if not persona:
-            return None
-        return persona[0].id
+        return self.get_block_id(name, "persona")
 
-    def get_human_id(self, name: str) -> str:
+    async def delete_persona(self, persona_id: str) -> Persona:
+        """
+        Delete a persona block template
+
+        Args:
+            id (str): ID of the persona block
+        """
+        return self.delete_block(persona_id)
+
+    async def get_human(self, human_id: str) -> Human:
+        """
+        Get a human block template
+
+        Args:
+            id (str): ID of the human block
+
+        Returns:
+            human (Human): Human block
+        """
+        return self.get_block(human_id)
+
+    async def get_human_id(self, name: str) -> str:
         """
         Get the ID of a human block template
 
@@ -2762,55 +2768,316 @@ class LocalClient(AbstractClient):
         Returns:
             id (str): ID of the human block
         """
-        human = self.server.get_blocks(name=name, label="human", user_id=self.user_id, template=True)
-        if not human:
-            return None
-        return human[0].id
+        return self.get_block_id(name, "human")
 
-    def delete_persona(self, id: str):
-        """
-        Delete a persona block template
-
-        Args:
-            id (str): ID of the persona block
-        """
-        self.server.delete_block(id)
-
-    def delete_human(self, id: str):
+    async def delete_human(self, human_id: str) -> Human:
         """
         Delete a human block template
 
         Args:
             id (str): ID of the human block
         """
-        self.server.delete_block(id)
+        return self.delete_block(human_id)
+
+    # sources
+
+    async def get_source(self, source_id: str) -> Source:
+        """
+        Get a source given the ID.
+
+        Args:
+            source_id (str): ID of the source
+
+        Returns:
+            source (Source): Source
+        """
+        response = requests.get(f"{self.base_url}/{self.api_prefix}/sources/{source_id}", headers=self.headers)
+        if response.status_code != 200:
+            raise ValueError(f"Failed to get source: {response.text}")
+        return Source(**response.json())
+
+    async def get_source_id(self, source_name: str) -> str:
+        """
+        Get the ID of a source
+
+        Args:
+            source_name (str): Name of the source
+
+        Returns:
+            source_id (str): ID of the source
+        """
+        response = requests.get(f"{self.base_url}/{self.api_prefix}/sources/name/{source_name}", headers=self.headers)
+        if response.status_code != 200:
+            raise ValueError(f"Failed to get source ID: {response.text}")
+        return response.json()
+
+    async def list_sources(self) -> List[Source]:
+        """
+        List available sources
+
+        Returns:
+            sources (List[Source]): List of sources
+        """
+        response = requests.get(f"{self.base_url}/{self.api_prefix}/sources", headers=self.headers)
+        if response.status_code != 200:
+            raise ValueError(f"Failed to list sources: {response.text}")
+        return [Source(**source) for source in response.json()]
+
+    async def delete_source(self, source_id: str):
+        """
+        Delete a source
+
+        Args:
+            source_id (str): ID of the source
+        """
+        response = requests.delete(f"{self.base_url}/{self.api_prefix}/sources/{str(source_id)}", headers=self.headers)
+        assert response.status_code == 200, f"Failed to delete source: {response.text}"
+
+    async def get_job(self, job_id: str) -> Job:
+        response = requests.get(f"{self.base_url}/{self.api_prefix}/jobs/{job_id}", headers=self.headers)
+        if response.status_code != 200:
+            raise ValueError(f"Failed to get job: {response.text}")
+        return Job(**response.json())
+
+    async def delete_job(self, job_id: str) -> Job:
+        response = requests.delete(f"{self.base_url}/{self.api_prefix}/jobs/{job_id}", headers=self.headers)
+        if response.status_code != 200:
+            raise ValueError(f"Failed to delete job: {response.text}")
+        return Job(**response.json())
+
+    async def list_jobs(self):
+        response = requests.get(f"{self.base_url}/{self.api_prefix}/jobs", headers=self.headers)
+        return [Job(**job) for job in response.json()]
+
+    async def list_active_jobs(self):
+        response = requests.get(f"{self.base_url}/{self.api_prefix}/jobs/active", headers=self.headers)
+        return [Job(**job) for job in response.json()]
+
+    async def load_data(self, connector: DataConnector, source_name: str):
+        raise NotImplementedError
+
+    async def load_file_to_source(self, filename: str, source_id: str, blocking=True) -> Job:
+        """
+        Load a file into a source asynchronously
+
+        Args:
+            filename (str): Name of the file
+            source_id (str): ID of the source
+            blocking (bool): Block until the job is complete
+
+        Returns:
+            job (Job): Data loading job including job status and metadata
+        """
+        # TODO: Implement file upload using http_client
+        files = {"file": open(filename, "rb")}
+        
+        response = await make_async_request(
+            "POST",
+            f"{self.base_url}/{self.api_prefix}/sources/{source_id}/upload",
+            headers=self.headers,
+            files=files
+        )
+        
+        job = Job(**response)
+        
+        if blocking:
+            while True:
+                job = await self.get_job(job.id)
+                if job.status == JobStatus.completed:
+                    break
+                elif job.status == JobStatus.failed:
+                    raise ValueError(f"Job failed: {job.metadata}")
+                await asyncio.sleep(1)
+        return job
+
+    async def delete_file_from_source(self, source_id: str, file_id: str) -> None:
+        await make_async_request(
+            "DELETE",
+            f"{self.base_url}/{self.api_prefix}/sources/{source_id}/{file_id}",
+            headers=self.headers
+        )
+
+    async def create_source(self, name: str) -> Source:
+        """Create a source asynchronously"""
+        payload = {"name": name}
+        response = await make_async_post_request(
+            f"{self.base_url}/{self.api_prefix}/sources",
+            headers=self.headers,
+            json_data=payload
+        )
+        return Source(**response)
+
+    async def list_attached_sources(self, agent_id: str) -> List[Source]:
+        """List sources attached to an agent asynchronously"""
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/agents/{agent_id}/sources",
+            headers=self.headers
+        )
+        return [Source(**source) for source in response]
+
+    async def delete_file_from_source(self, source_id: str, file_id: str) -> None:
+        response = await make_async_request(
+            "DELETE",
+            f"{self.base_url}/{self.api_prefix}/sources/{source_id}/{file_id}",
+            headers=self.headers
+        )
+        if response.status_code not in [200, 204]:
+            raise ValueError(f"Failed to delete tool: {response.text}")
+
+    async def create_source(self, name: str) -> Source:
+        """
+        Create a source
+
+        Args:
+            name (str): Name of the source
+
+        Returns:
+            source (Source): Created source
+        """
+        payload = {"name": name}
+        response = await make_async_post_request(
+            f"{self.base_url}/{self.api_prefix}/sources",
+            headers=self.headers,
+            json_data=payload
+        )
+        return Source(**response)
+
+    async def list_attached_sources(self, agent_id: str) -> List[Source]:
+        """
+        List sources attached to an agent
+
+        Args:
+            agent_id (str): ID of the agent
+
+        Returns:
+            sources (List[Source]): List of sources
+        """
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/agents/{agent_id}/sources",
+            headers=self.headers
+        )
+        if response.status_code != 200:
+            raise ValueError(f"Failed to list attached sources: {response.text}")
+        return [Source(**source) for source in response]
+
+    async def list_files_from_source(self, source_id: str, limit: int = 1000, cursor: Optional[str] = None) -> List[FileMetadata]:
+        """
+        List files from source with pagination support.
+
+        Args:
+            source_id (str): ID of the source
+            limit (int): Number of files to return
+            cursor (Optional[str]): Pagination cursor for fetching the next page
+
+        Returns:
+            List[FileMetadata]: List of files
+        """
+        # Prepare query parameters for pagination
+        params = {"limit": limit, "cursor": cursor}
+
+        # Make the request to the FastAPI endpoint
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/sources/{source_id}/files",
+            headers=self.headers,
+            params=params
+        )
+
+        if response.status_code != 200:
+            raise ValueError(f"Failed to list files with source id {source_id}: [{response.status_code}] {response.text}")
+
+        # Parse the JSON response
+        return [FileMetadata(**metadata) for metadata in response.json()]
+
+    async def update_source(self, source_id: str, name: Optional[str] = None) -> Source:
+        """
+        Update a source
+
+        Args:
+            source_id (str): ID of the source
+            name (str): Name of the source
+
+        Returns:
+            source (Source): Updated source
+        """
+        request = SourceUpdate(id=source_id, name=name)
+        response = await make_async_patch_request(
+            f"{self.base_url}/{self.api_prefix}/sources/{source_id}",
+            headers=self.headers,
+            json_data=request.model_dump()
+        )
+        if response.status_code != 200:
+            raise ValueError(f"Failed to update source: {response.text}")
+        return Source(**response.json())
+
+    async def attach_source_to_agent(self, source_id: str, agent_id: str):
+        """
+        Attach a source to an agent
+
+        Args:
+            agent_id (str): ID of the agent
+            source_id (str): ID of the source
+            source_name (str): Name of the source
+        """
+        params = {"agent_id": agent_id}
+        response = await make_async_post_request(
+            f"{self.base_url}/{self.api_prefix}/sources/{source_id}/attach",
+            headers=self.headers,
+            params=params
+        )
+        assert response.status_code == 200, f"Failed to attach source to agent: {response.text}"
+
+    async def detach_source_from_agent(self, source_id: str, agent_id: str):
+        """Detach a source from an agent"""
+        params = {"agent_id": str(agent_id)}
+        response = await make_async_post_request(
+            f"{self.base_url}/{self.api_prefix}/sources/{source_id}/detach",
+            headers=self.headers,
+            params=params
+        )
+        assert response.status_code == 200, f"Failed to detach source from agent: {response.text}"
+        return Source(**response.json())
 
     # tools
-    def load_langchain_tool(self, langchain_tool: "LangChainBaseTool", additional_imports_module_attr_map: dict[str, str] = None) -> Tool:
-        tool_create = ToolCreate.from_langchain(
-            langchain_tool=langchain_tool,
-            additional_imports_module_attr_map=additional_imports_module_attr_map,
+
+    async def get_tool_id(self, tool_name: str):
+        """
+        Get the ID of a tool
+
+        Args:
+            name (str): Name of the tool
+
+        Returns:
+            id (str): ID of the tool (`None` if not found)
+        """
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/tools/name/{tool_name}",
+            headers=self.headers
         )
-        return self.server.tool_manager.create_or_update_tool(pydantic_tool=Tool(**tool_create.model_dump()), actor=self.user)
+        if response.status_code == 404:
+            return None
+        elif response.status_code != 200:
+            raise ValueError(f"Failed to get tool: {response.text}")
+        return response.json()
 
-    def load_crewai_tool(self, crewai_tool: "CrewAIBaseTool", additional_imports_module_attr_map: dict[str, str] = None) -> Tool:
-        tool_create = ToolCreate.from_crewai(
-            crewai_tool=crewai_tool,
-            additional_imports_module_attr_map=additional_imports_module_attr_map,
+    async def add_base_tools(self) -> List[Tool]:
+        response = await make_async_post_request(
+            f"{self.base_url}/{self.api_prefix}/tools/add-base-tools/",
+            headers=self.headers
         )
-        return self.server.tool_manager.create_or_update_tool(pydantic_tool=Tool(**tool_create.model_dump()), actor=self.user)
+        if response.status_code != 200:
+            raise ValueError(f"Failed to add base tools: {response.text}")
 
-    def load_composio_tool(self, action: "ActionType") -> Tool:
-        tool_create = ToolCreate.from_composio(action=action)
-        return self.server.tool_manager.create_or_update_tool(pydantic_tool=Tool(**tool_create.model_dump()), actor=self.user)
+        return [Tool(**tool) for tool in response.json()]
 
-    # TODO: Use the above function `add_tool` here as there is duplicate logic
-    def create_tool(
+    async def create_tool(
         self,
         func,
         name: Optional[str] = None,
         tags: Optional[List[str]] = None,
-        description: Optional[str] = None,
     ) -> Tool:
         """
         Create a tool. This stores the source code of function on the server, so that the server can execute the function and generate an OpenAI JSON schemas for it when using with an agent.
@@ -2819,37 +3086,36 @@ class LocalClient(AbstractClient):
             func (callable): The function to create a tool for.
             name: (str): Name of the tool (must be unique per-user.)
             tags (Optional[List[str]], optional): Tags for the tool. Defaults to None.
-            description (str, optional): The description.
 
         Returns:
             tool (Tool): The created tool.
         """
+
+        # TODO: check tool update code
         # TODO: check if tool already exists
+
         # TODO: how to load modules?
         # parse source code/schema
         source_code = parse_source_code(func)
         source_type = "python"
-        if not tags:
-            tags = []
 
         # call server function
-        return self.server.tool_manager.create_or_update_tool(
-            Tool(
-                source_type=source_type,
-                source_code=source_code,
-                name=name,
-                tags=tags,
-                description=description,
-            ),
-            actor=self.user,
+        request = ToolCreate(source_type=source_type, source_code=source_code, name=name, tags=tags)
+        response = await make_async_post_request(
+            f"{self.base_url}/{self.api_prefix}/tools",
+            headers=self.headers,
+            json_data=request.model_dump()
         )
+        if response.status_code != 200:
+            raise ValueError(f"Failed to create tool: {response.text}")
+        return Tool(**response.json())
 
-    def update_tool(
+    async def update_tool(
         self,
         id: str,
         name: Optional[str] = None,
         description: Optional[str] = None,
-        func: Optional[callable] = None,
+        func: Optional[Callable] = None,
         tags: Optional[List[str]] = None,
     ) -> Tool:
         """
@@ -2864,31 +3130,102 @@ class LocalClient(AbstractClient):
         Returns:
             tool (Tool): Updated tool
         """
-        update_data = {
-            "source_type": "python",  # Always include source_type
-            "source_code": parse_source_code(func) if func else None,
-            "tags": tags,
-            "name": name,
-            "description": description,
-        }
+        if func:
+            source_code = parse_source_code(func)
+        else:
+            source_code = None
 
-        # Filter out any None values from the dictionary
-        update_data = {key: value for key, value in update_data.items() if value is not None}
+        source_type = "python"
 
-        return self.server.tool_manager.update_tool_by_id(tool_id=id, tool_update=ToolUpdate(**update_data), actor=self.user)
+        request = ToolUpdate(description=description, source_type=source_type, source_code=source_code, tags=tags, name=name)
+        response = await make_async_patch_request(
+            f"{self.base_url}/{self.api_prefix}/tools/{id}",
+            headers=self.headers,
+            json_data=request.model_dump()
+        )
+        if response.status_code != 200:
+            raise ValueError(f"Failed to update tool: {response.text}")
+        return Tool(**response.json())
 
-    def list_tools(self, cursor: Optional[str] = None, limit: Optional[int] = 50) -> List[Tool]:
+    # def create_tool(
+    #    self,
+    #    func,
+    #    name: Optional[str] = None,
+    #    update: Optional[bool] = True,  # TODO: actually use this
+    #    tags: Optional[List[str]] = None,
+    # ):
+    #    """Create a tool
+
+    #    Args:
+    #        func (callable): The function to create a tool for.
+    #        tags (Optional[List[str]], optional): Tags for the tool. Defaults to None.
+    #        update (bool, optional): Update the tool if it already exists. Defaults to True.
+
+    #    Returns:
+    #        Tool object
+    #    """
+
+    #    # TODO: check if tool already exists
+    #    # TODO: how to load modules?
+    #    # parse source code/schema
+    #    source_code = parse_source_code(func)
+    #    json_schema = generate_schema(func, name)
+    #    source_type = "python"
+    #    json_schema["name"]
+
+    #    # create data
+    #    data = {"source_code": source_code, "source_type": source_type, "tags": tags, "json_schema": json_schema, "update": update}
+    #    try:
+    #        CreateToolRequest(**data)  # validate data
+    #    except Exception as e:
+    #        raise ValueError(f"Failed to create tool: {e}, invalid input {data}")
+
+    #    # make REST request
+    #    response = requests.post(f"{self.base_url}/{self.api_prefix}/tools", json=data, headers=self.headers)
+    #    if response.status_code != 200:
+    #        raise ValueError(f"Failed to create tool: {response.text}")
+    #    return ToolModel(**response.json())
+
+    async def list_tools(self, cursor: Optional[str] = None, limit: Optional[int] = 50) -> List[Tool]:
         """
         List available tools for the user.
 
         Returns:
             tools (List[Tool]): List of tools
         """
-        return self.server.tool_manager.list_tools(cursor=cursor, limit=limit, actor=self.user)
+        params = {}
+        if cursor:
+            params["cursor"] = str(cursor)
+        if limit:
+            params["limit"] = limit
 
-    def get_tool(self, id: str) -> Optional[Tool]:
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/tools",
+            headers=self.headers,
+            params=params
+        )
+        if response.status_code != 200:
+            raise ValueError(f"Failed to list tools: {response.text}")
+        return [Tool(**tool) for tool in response.json()]
+
+    async def delete_tool(self, name: str):
         """
-        Get a tool given its ID.
+        Delete a tool given the ID.
+
+        Args:
+            id (str): ID of the tool
+        """
+        response = await make_async_delete_request(
+            f"{self.base_url}/{self.api_prefix}/tools/{name}",
+            headers=self.headers
+        )
+        if response.status_code != 200:
+            raise ValueError(f"Failed to delete tool: {response.text}")
+
+    async def get_tool(self, id: str) -> Optional[Tool]:
+        """
+        Get a tool give its ID.
 
         Args:
             id (str): ID of the tool
@@ -2896,379 +3233,148 @@ class LocalClient(AbstractClient):
         Returns:
             tool (Tool): Tool
         """
-        return self.server.tool_manager.get_tool_by_id(id, actor=self.user)
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/tools/{id}",
+            headers=self.headers
+        )
+        if response.status_code == 404:
+            return None
+        elif response.status_code != 200:
+            raise ValueError(f"Failed to get tool: {response.text}")
+        return Tool(**response.json())
 
-    def delete_tool(self, id: str):
+    async def get_tool_id(self, name: str) -> Optional[str]:
         """
-        Delete a tool given the ID.
+        Get a tool ID by its name.
 
         Args:
             id (str): ID of the tool
-        """
-        return self.server.tool_manager.delete_tool_by_id(id, self.user)
-
-    def get_tool_id(self, name: str) -> Optional[str]:
-        """
-        Get the ID of a tool from its name. The client will use the org_id it is configured with.
-
-        Args:
-            name (str): Name of the tool
 
         Returns:
-            id (str): ID of the tool (`None` if not found)
+            tool (Tool): Tool
         """
-        tool = self.server.tool_manager.get_tool_by_name(tool_name=name, actor=self.user)
-        return tool.id
-
-    def load_data(self, connector: DataConnector, source_name: str):
-        """
-        Load data into a source
-
-        Args:
-            connector (DataConnector): Data connector
-            source_name (str): Name of the source
-        """
-        self.server.load_data(user_id=self.user_id, connector=connector, source_name=source_name)
-
-    def load_file_to_source(self, filename: str, source_id: str, blocking=True):
-        """
-        Load a file into a source
-
-        Args:
-            filename (str): Name of the file
-            source_id (str): ID of the source
-            blocking (bool): Block until the job is complete
-
-        Returns:
-            job (Job): Data loading job including job status and metadata
-        """
-        metadata_ = {"type": "embedding", "filename": filename, "source_id": source_id}
-        job = self.server.create_job(user_id=self.user_id, metadata=metadata_)
-
-        # TODO: implement blocking vs. non-blocking
-        self.server.load_file_to_source(source_id=source_id, file_path=filename, job_id=job.id)
-        return job
-
-    def delete_file_from_source(self, source_id: str, file_id: str):
-        self.server.delete_file_from_source(source_id, file_id, user_id=self.user_id)
-
-    def get_job(self, job_id: str):
-        return self.server.get_job(job_id=job_id)
-
-    def delete_job(self, job_id: str):
-        return self.server.delete_job(job_id)
-
-    def list_jobs(self):
-        return self.server.list_jobs(user_id=self.user_id)
-
-    def list_active_jobs(self):
-        return self.server.list_active_jobs(user_id=self.user_id)
-
-    def create_source(self, name: str) -> Source:
-        """
-        Create a source
-
-        Args:
-            name (str): Name of the source
-
-        Returns:
-            source (Source): Created source
-        """
-        request = SourceCreate(name=name)
-        return self.server.create_source(request=request, user_id=self.user_id)
-
-    def delete_source(self, source_id: str):
-        """
-        Delete a source
-
-        Args:
-            source_id (str): ID of the source
-        """
-
-        # TODO: delete source data
-        self.server.delete_source(source_id=source_id, user_id=self.user_id)
-
-    def get_source(self, source_id: str) -> Source:
-        """
-        Get a source given the ID.
-
-        Args:
-            source_id (str): ID of the source
-
-        Returns:
-            source (Source): Source
-        """
-        return self.server.get_source(source_id=source_id, user_id=self.user_id)
-
-    def get_source_id(self, source_name: str) -> str:
-        """
-        Get the ID of a source
-
-        Args:
-            source_name (str): Name of the source
-
-        Returns:
-            source_id (str): ID of the source
-        """
-        return self.server.get_source_id(source_name=source_name, user_id=self.user_id)
-
-    def attach_source_to_agent(self, source_id: str, agent_id: str):
-        """
-        Attach a source to an agent
-
-        Args:
-            agent_id (str): ID of the agent
-            source_id (str): ID of the source
-            source_name (str): Name of the source
-        """
-        self.server.attach_source_to_agent(source_id=source_id, source_name=source_name, agent_id=agent_id, user_id=self.user_id)
-
-    def detach_source_from_agent(self, source_id: str, agent_id: str):
-        """
-        Detach a source from an agent by removing all `Passage` objects that were loaded from the source from archival memory.
-        Args:
-            agent_id (str): ID of the agent
-            source_id (str): ID of the source
-            source_name (str): Name of the source
-        Returns:
-            source (Source): Detached source
-        """
-        return self.server.detach_source_from_agent(source_id=source_id, source_name=source_name, agent_id=agent_id, user_id=self.user_id)
-
-    def list_sources(self) -> List[Source]:
-        """
-        List available sources
-
-        Returns:
-            sources (List[Source]): List of sources
-        """
-
-        return self.server.list_all_sources(user_id=self.user_id)
-
-    def list_attached_sources(self, agent_id: str) -> List[Source]:
-        """
-        List sources attached to an agent
-
-        Args:
-            agent_id (str): ID of the agent
-
-        Returns:
-            sources (List[Source]): List of sources
-        """
-        return self.server.list_attached_sources(agent_id=agent_id)
-
-    def list_files_from_source(self, source_id: str, limit: int = 1000, cursor: Optional[str] = None) -> List[FileMetadata]:
-        """
-        List files from source.
-
-        Args:
-            source_id (str): ID of the source
-            limit (int): The # of items to return
-            cursor (str): The cursor for fetching the next page
-
-        Returns:
-            files (List[FileMetadata]): List of files
-        """
-        return self.server.list_files_from_source(source_id=source_id, limit=limit, cursor=cursor)
-
-    def update_source(self, source_id: str, name: Optional[str] = None) -> Source:
-        """
-        Update a source
-
-        Args:
-            source_id (str): ID of the source
-            name (str): Name of the source
-
-        Returns:
-            source (Source): Updated source
-        """
-        # TODO should the arg here just be "source_update: Source"?
-        request = SourceUpdate(id=source_id, name=name)
-        return self.server.update_source(request=request, user_id=self.user_id)
-
-    # archival memory
-
-    def insert_archival_memory(self, agent_id: str, memory: str) -> List[Passage]:
-        """
-        Insert archival memory into an agent
-
-        Args:
-            agent_id (str): ID of the agent
-            memory (str): Memory string to insert
-
-        Returns:
-            passages (List[Passage]): List of inserted passages
-        """
-        return self.server.insert_archival_memory(user_id=self.user_id, agent_id=agent_id, memory_contents=memory)
-
-    def delete_archival_memory(self, agent_id: str, memory_id: str):
-        """
-        Delete archival memory from an agent
-
-        Args:
-            agent_id (str): ID of the agent
-            memory_id (str): ID of the memory
-        """
-        self.server.delete_archival_memory(user_id=self.user_id, agent_id=agent_id, memory_id=memory_id)
-
-    def get_archival_memory(
-        self, agent_id: str, before: Optional[str] = None, after: Optional[str] = None, limit: Optional[int] = 1000
-    ) -> List[Passage]:
-        """
-        Get archival memory from an agent with pagination.
-
-        Args:
-            agent_id (str): ID of the agent
-            before (str): Get memories before a certain time
-            after (str): Get memories after a certain time
-            limit (int): Limit number of memories
-
-        Returns:
-            passages (List[Passage]): List of passages
-        """
-
-        return self.server.get_agent_archival_cursor(user_id=self.user_id, agent_id=agent_id, before=before, after=after, limit=limit)
-
-    # recall memory
-
-    def get_messages(
-        self, agent_id: str, before: Optional[str] = None, after: Optional[str] = None, limit: Optional[int] = 1000
-    ) -> List[Message]:
-        """
-        Get messages from an agent with pagination.
-
-        Args:
-            agent_id (str): ID of the agent
-            before (str): Get messages before a certain time
-            after (str): Get messages after a certain time
-            limit (int): Limit number of messages
-
-        Returns:
-            messages (List[Message]): List of messages
-        """
-
-        self.interface.clear()
-        return self.server.get_agent_recall_cursor(
-            user_id=self.user_id,
-            agent_id=agent_id,
-            before=before,
-            after=after,
-            limit=limit,
-            reverse=True,
-            return_message_object=True,
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/tools/name/{name}",
+            headers=self.headers
         )
+        if response.status_code == 404:
+            return None
+        elif response.status_code != 200:
+            raise ValueError(f"Failed to get tool: {response.text}")
+        return response.json()
 
-    def list_blocks(self, label: Optional[str] = None, templates_only: Optional[bool] = True) -> List[Block]:
+    async def set_default_llm_config(self, llm_config: LLMConfig):
         """
-        List available blocks
-
-        Args:
-            label (str): Label of the block
-            templates_only (bool): List only templates
-
-        Returns:
-            blocks (List[Block]): List of blocks
-        """
-        return self.server.get_blocks(label=label, template=templates_only)
-
-    def create_block(self, label: str, text: str, template_name: Optional[str] = None, template: bool = False) -> Block:  #
-        """
-        Create a block
-
-        Args:
-            label (str): Label of the block
-            name (str): Name of the block
-            text (str): Text of the block
-
-        Returns:
-            block (Block): Created block
-        """
-        return self.server.create_block(
-            CreateBlock(label=label, template_name=template_name, value=text, user_id=self.user_id, template=template), user_id=self.user_id
-        )
-
-    def update_block(self, block_id: str, name: Optional[str] = None, text: Optional[str] = None) -> Block:
-        """
-        Update a block
-
-        Args:
-            block_id (str): ID of the block
-            name (str): Name of the block
-            text (str): Text of the block
-
-        Returns:
-            block (Block): Updated block
-        """
-        return self.server.update_block(UpdateBlock(id=block_id, template_name=name, value=text))
-
-    def get_block(self, block_id: str) -> Block:
-        """
-        Get a block
-
-        Args:
-            block_id (str): ID of the block
-
-        Returns:
-            block (Block): Block
-        """
-        return self.server.get_block(block_id)
-
-    def delete_block(self, id: str) -> Block:
-        """
-        Delete a block
-
-        Args:
-            id (str): ID of the block
-
-        Returns:
-            block (Block): Deleted block
-        """
-        return self.server.delete_block(id)
-
-    def set_default_llm_config(self, llm_config: LLMConfig):
-        """
-        Set the default LLM configuration for agents.
+        Set the default LLM configuration
 
         Args:
             llm_config (LLMConfig): LLM configuration
         """
         self._default_llm_config = llm_config
 
-    def set_default_embedding_config(self, embedding_config: EmbeddingConfig):
+    async def set_default_embedding_config(self, embedding_config: EmbeddingConfig):
         """
-        Set the default embedding configuration for agents.
+        Set the default embedding configuration
 
         Args:
             embedding_config (EmbeddingConfig): Embedding configuration
         """
         self._default_embedding_config = embedding_config
 
-    def list_llm_configs(self) -> List[LLMConfig]:
+    async def list_llm_configs(self) -> List[LLMConfig]:
         """
         List available LLM configurations
 
         Returns:
             configs (List[LLMConfig]): List of LLM configurations
         """
-        return self.server.list_llm_models()
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/models",
+            headers=self.headers
+        )
+        if response.status_code != 200:
+            raise ValueError(f"Failed to list LLM configs: {response.text}")
+        return [LLMConfig(**config) for config in response.json()]
 
-    def list_embedding_configs(self) -> List[EmbeddingConfig]:
+    async def list_embedding_configs(self) -> List[EmbeddingConfig]:
         """
         List available embedding configurations
 
         Returns:
             configs (List[EmbeddingConfig]): List of embedding configurations
         """
-        return self.server.list_embedding_models()
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{self.api_prefix}/models/embedding",
+            headers=self.headers
+        )
+        if response.status_code != 200:
+            raise ValueError(f"Failed to list embedding configs: {response.text}")
+        return [EmbeddingConfig(**config) for config in response.json()]
 
-    def create_org(self, name: Optional[str] = None) -> Organization:
-        return self.server.organization_manager.create_organization(pydantic_org=Organization(name=name))
+    async def list_orgs(self, cursor: Optional[str] = None, limit: Optional[int] = 50) -> List[Organization]:
+        """
+        Retrieves a list of all organizations in the database, with optional pagination.
 
-    def list_orgs(self, cursor: Optional[str] = None, limit: Optional[int] = 50) -> List[Organization]:
-        return self.server.organization_manager.list_organizations(cursor=cursor, limit=limit)
+        @param cursor: the pagination cursor, if any
+        @param limit: the maximum number of organizations to retrieve
+        @return: a list of Organization objects
+        """
+        params = {"cursor": cursor, "limit": limit}
+        response = await make_async_request(
+            "GET",
+            f"{self.base_url}/{ADMIN_PREFIX}/orgs",
+            headers=self.headers,
+            params=params
+        )
+        if response.status_code != 200:
+            raise ValueError(f"Failed to retrieve organizations: {response.text}")
+        return [Organization(**org_data) for org_data in response.json()]
 
-    def delete_org(self, org_id: str) -> Organization:
-        return self.server.organization_manager.delete_organization_by_id(org_id=org_id)
+    async def create_org(self, name: Optional[str] = None) -> Organization:
+        """
+        Creates an organization with the given name. If not provided, we generate a random one.
+
+        @param name: the name of the organization
+        @return: the created Organization
+        """
+        payload = {"name": name}
+        response = await make_async_post_request(
+            f"{self.base_url}/{ADMIN_PREFIX}/orgs",
+            headers=self.headers,
+            json_data=payload
+        )
+        if response.status_code != 200:
+            raise ValueError(f"Failed to create org: {response.text}")
+        return Organization(**response.json())
+
+    async def delete_org(self, org_id: str) -> Organization:
+        """
+        Deletes an organization by its ID.
+
+        @param org_id: the ID of the organization to delete
+        @return: the deleted Organization object
+        """
+        # Define query parameters with org_id
+        params = {"org_id": org_id}
+
+        # Make the DELETE request with query parameters
+        response = await make_async_delete_request(
+            f"{self.base_url}/{ADMIN_PREFIX}/orgs",
+            headers=self.headers,
+            params=params
+        )
+
+        if response.status_code == 404:
+            raise ValueError(f"Organization with ID '{org_id}' does not exist")
+        elif response.status_code != 200:
+            raise ValueError(f"Failed to delete organization: {response.text}")
+
+        # Parse and return the deleted organization
+        return Organization(**response.json())
 
     async def load_file_to_source(self, filename: str, source_id: str, blocking=True) -> Job:
         """Load a file into a source locally"""
@@ -3286,7 +3392,7 @@ class LocalClient(AbstractClient):
         if blocking:
             await self.server.load_file_to_source(source_id, filename, job_id)
         else:
-            asyncio.create_task(self.server.load_file_to_source(source_id, filename, job_id))
+            asyncio.create_task(await self.server.load_file_to_source(source_id, filename, job_id))
             
         return job
 
@@ -3351,34 +3457,3 @@ class LocalClient(AbstractClient):
         if source_id is None:
             source_id = await self.get_source_id(source_name)
         return await self.server.detach_source_from_agent(agent_id, source_id)
-
-    async def acreate_org(self, name: Optional[str] = None) -> Organization:
-        """Async version of create_org"""
-        payload = {"name": name}
-        response = await make_async_post_request(
-            f"{self.base_url}/{ADMIN_PREFIX}/orgs",
-            headers=self.headers,
-            json_data=payload
-        )
-        return Organization(**response)
-
-    async def alist_orgs(self, cursor: Optional[str] = None, limit: Optional[int] = 50) -> List[Organization]:
-        """Async version of list_orgs"""
-        params = {"cursor": cursor, "limit": limit}
-        response = await make_async_request(
-            "GET",
-            f"{self.base_url}/{ADMIN_PREFIX}/orgs",
-            headers=self.headers,
-            params=params
-        )
-        return [Organization(**org_data) for org_data in response]
-
-    async def adelete_org(self, org_id: str) -> Organization:
-        """Async version of delete_org"""
-        params = {"org_id": org_id}
-        response = await make_async_delete_request(
-            f"{self.base_url}/{ADMIN_PREFIX}/orgs",
-            headers=self.headers,
-            params=params
-        )
-        return Organization(**response)

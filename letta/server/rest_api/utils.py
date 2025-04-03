@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from letta.schemas.usage import LettaUsageStatistics
 from letta.server.rest_api.interface import StreamingServerInterface
-from letta.server.server import SyncServer
+from letta.server.server import AsyncServer
 
 # from letta.orm.user import User
 # from letta.orm.utilities import get_db_session
@@ -20,7 +20,7 @@ SSE_FINISH_MSG = "[DONE]"  # mimic openai
 SSE_ARTIFICIAL_DELAY = 0.1
 
 
-def sse_formatter(data: Union[dict, str]) -> str:
+async def sse_formatter(data: Union[dict, str]) -> str:
     """Prefix with 'data: ', and always include double newlines"""
     assert type(data) in [dict, str], f"Expected type dict or str, got type {type(data)}"
     data_str = json.dumps(data, separators=(",", ":")) if isinstance(data, dict) else data
@@ -76,13 +76,13 @@ async def sse_async_generator(
 
 
 # TODO: why does this double up the interface?
-def get_letta_server() -> SyncServer:
+async def get_letta_server() -> AsyncServer:
     # Check if a global server is already instantiated
     from letta.server.rest_api.app import server
 
-    # assert isinstance(server, SyncServer)
+    # assert isinstance(server, AsyncServer)
     return server
 
 
-def get_current_interface() -> StreamingServerInterface:
+async def get_current_interface() -> StreamingServerInterface:
     return StreamingServerInterface

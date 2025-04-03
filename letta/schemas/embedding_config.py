@@ -33,8 +33,14 @@ class EmbeddingConfig(BaseModel):
 
     @classmethod
     def default_config(cls, model_name: Optional[str] = None, provider: Optional[str] = None):
-
-        if model_name == "ollama":
+        if model_name == "text-embedding-mxbai-embed-large-v1":
+            return cls(
+                embedding_model="text-embedding-mxbai-embed-large-v1",
+                embedding_endpoint_type="lmstudio",
+                embedding_endpoint="http://127.0.0.1:1234/v1",
+                embedding_dim=1024,
+                embedding_chunk_size=300,
+            )
             return cls(
                 embedding_model="nomic-embed-text:latest",
                 embedding_endpoint_type="ollama",

@@ -260,7 +260,7 @@ class Agent(BaseAgent):
         assert isinstance(
             self.agent_state.memory, Memory
         ), f"Memory object is not of type Memory: {type(self.agent_state.memory)}"
-        self.sync_server: 'SyncServer' = None
+        self.sync_server: 'AsyncServer' = None
 
         # link tools
         self.link_tools(tools)
@@ -1784,8 +1784,8 @@ async def update_state(self) -> AgentState:
             functions_definitions=available_functions_definitions,
         )
 
-    def set_server(self, server: 'SyncServer'):
-        """Set the SyncServer instance for the agent."""
+    def set_server(self, server: 'AsyncServer'):
+        """Set the AsyncServer instance for the agent."""
         self.sync_server = server
 
 

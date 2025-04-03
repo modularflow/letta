@@ -53,7 +53,7 @@ class AgentsTagsManager:
         with self.session_maker() as session:
             # Query for all agents with the given tag
             agents_with_tag = AgentsTagsModel.list(db_session=session, tag=tag, organization_id=actor.organization_id)
-            return [record.agent_id for record in agents_with_tag]
+            return [record.gent_id for record in agents_with_tag]
 
     @enforce_types
     def get_tags_for_agent(self, agent_id: str, actor: PydanticUser) -> List[str]:
@@ -68,8 +68,8 @@ class AsyncAgentsTagsManager:
     """Async manager class to handle business logic related to Tags."""
 
     def __init__(self):
-        from letta.server.server import db_context
-        self.session_maker = db_context
+        from letta.server.server import async_db_context
+        self.session_maker = async_db_context
 
     @enforce_types
     async def add_tag_to_agent(self, agent_id: str, tag: str, actor: PydanticUser) -> PydanticAgentsTags:
@@ -77,12 +77,12 @@ class AsyncAgentsTagsManager:
         async with self.session_maker() as session:
             # Check if the tag already exists for this agent
             try:
-                agents_tags_model = await AgentsTagsModel.aread(db_session=session, agent_id=agent_id, tag=tag, actor=actor)
+                agents_tags_model = await AgentsTagsModel.read(db_session=session, agent_id=agent_id, tag=tag, actor=actor)
                 return agents_tags_model.to_pydantic()
             except NoResultFound:
                 agents_tags = PydanticAgentsTags(agent_id=agent_id, tag=tag).model_dump(exclude_none=True)
                 new_tag = AgentsTagsModel(**agents_tags, organization_id=actor.organization_id)
-                await new_tag.acreate(session, actor=actor)
+                await new_tag.create(session, actor=actor)
                 return new_tag.to_pydantic()
 
     @enforce_types
@@ -96,19 +96,44 @@ class AsyncAgentsTagsManager:
     async def delete_tag_from_agent(self, agent_id: str, tag: str, actor: PydanticUser):
         """Delete a tag from an agent."""
         async with self.session_maker() as session:
-            agents_tags_model = await AgentsTagsModel.aread(db_session=session, agent_id=agent_id, tag=tag, actor=actor)
-            await agents_tags_model.ahard_delete(session, actor=actor)
+            agents_tags_model = await AgentsTagsModel.read(db_session=session, agent_id=agent_id, tag=tag, actor=actor)
+            await agents_tags_model.hard_delete(session, actor=actor)
 
     @enforce_types
     async def get_tags_for_agent(self, agent_id: str, actor: PydanticUser) -> List[str]:
         """Get all tags for an agent."""
         async with self.session_maker() as session:
-            results = await AgentsTagsModel.alist(db_session=session, agent_id=agent_id)
+            results = await AgentsTagsModel.list(db_session=session, agent_id=agent_id)
             return [result.tag for result in results]
 
     @enforce_types
     async def get_agents_by_tag(self, tag: str, actor: PydanticUser) -> List[str]:
         """Get all agents for a tag."""
         async with self.session_maker() as session:
-            results = await AgentsTagsModel.alist(db_session=session, tag=tag)
-            return [result.agent_id for result in results]
+            results = await AgentsTagsModel.list(db_session=session, tag=tag)
+            return [result.gent_id for result in results]
+
+    @enforce_types
+    async def create_or_update_tag(
+        self, agents_tags_model: AgentsTagsModel, actor: PydanticUser
+    ) -> PydanticAgentsTags:
+        """Create a new tag or update if it already exists."""
+        async with self.session_maker() as session:
+            try:
+                existing_tag = await AgentsTagsModel.read(
+                    db_session=session,
+                    name=agents_tags_model.name,
+                    organization_id=actor.organization_id,
+                    actor=actor,
+                )
+                for key, value in agents_tags_model.model_dump().items():
+                    if key != "id":  # Don't update the ID
+                        setattr(existing_tag, key, value)
+                await existing_tag.update(session, actor=actor)
+                return await existing_tag.to_pydantic()
+            except NoResultFound:
+                # Create new tag
+                agents_tags_model.organization_id = actor.organization_id
+                new_tag = AgentsTagsModel(**agents_tags_model.model_dump())
+                await new_tag.create(session, actor=actor)
+                return await new_tag.to_pydantic()

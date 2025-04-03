@@ -1,9 +1,10 @@
 import base64
 import os
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, AsyncIterator
 
 import numpy as np
+from pydantic import BaseModel
 from sqlalchemy import (
     BINARY,
     Column,

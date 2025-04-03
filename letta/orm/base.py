@@ -33,7 +33,7 @@ class CommonSqlalchemyMetaMixins(Base):
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), server_default=func.now(), server_onupdate=func.now())
     is_deleted: Mapped[bool] = mapped_column(Boolean, server_default=text("FALSE"))
 
-    def _set_created_and_updated_by_fields(self, actor_id: str) -> None:
+    async def _set_created_and_updated_by_fields(self, actor_id: str) -> None:
         """Populate created_by_id and last_updated_by_id based on actor."""
         if not self.created_by_id:
             self.created_by_id = actor_id

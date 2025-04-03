@@ -3,12 +3,12 @@ import uuid
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from letta.server.server import SyncServer
+from letta.server.server import AsyncServer
 
 security = HTTPBearer()
 
 
-def get_current_user(server: SyncServer, password: str, auth: HTTPAuthorizationCredentials = Depends(security)) -> uuid.UUID:
+def get_current_user(server: AsyncServer, password: str, auth: HTTPAuthorizationCredentials = Depends(security)) -> uuid.UUID:
     try:
         api_key_or_password = auth.credentials
         if api_key_or_password == password:

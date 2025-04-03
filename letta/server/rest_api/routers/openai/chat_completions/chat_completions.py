@@ -20,7 +20,7 @@ from letta.server.rest_api.utils import get_letta_server
 if TYPE_CHECKING:
     pass
 
-    from letta.server.server import SyncServer
+    from letta.server.server import AsyncServer
     from letta.utils import get_utc_time
 
 router = APIRouter(prefix="/v1/chat/completions", tags=["chat_completions"])
@@ -29,7 +29,7 @@ router = APIRouter(prefix="/v1/chat/completions", tags=["chat_completions"])
 @router.post("/", response_model=ChatCompletionResponse)
 async def create_chat_completion(
     completion_request: ChatCompletionRequest = Body(...),
-    server: "SyncServer" = Depends(get_letta_server),
+    server: "AsyncServer" = Depends(get_letta_server),
     user_id: Optional[str] = Header(None, alias="user_id"),  # Extract user_id from header, default to None if not present
 ):
     """Send a message to a Letta agent via a /chat/completions completion_request

@@ -22,39 +22,39 @@ class UserManager:
         self.session_maker = db_context
 
     @enforce_types
-    def create_default_user(self, org_id: str = OrganizationManager.DEFAULT_ORG_ID) -> PydanticUser:
+    async def create_default_user(self, org_id: str = OrganizationManager.DEFAULT_ORG_ID) -> PydanticUser:
         """Create the default user."""
         with self.session_maker() as session:
             # Make sure the org id exists
             try:
-                OrganizationModel.read(db_session=session, identifier=org_id)
+                OrganizationModel.aread(db_session=session, identifier=org_id)
             except NoResultFound:
                 raise ValueError(f"No organization with {org_id} exists in the organization table.")
 
             # Try to retrieve the user
             try:
-                user = UserModel.read(db_session=session, identifier=self.DEFAULT_USER_ID)
+                user = UserModel.aread(db_session=session, identifier=self.DEFAULT_USER_ID)
             except NoResultFound:
                 # If it doesn't exist, make it
                 user = UserModel(id=self.DEFAULT_USER_ID, name=self.DEFAULT_USER_NAME, organization_id=org_id)
-                user.create(session)
+                await user.acreate(session)
 
-            return user.to_pydantic()
+            return await user.to_pydantic()
 
     @enforce_types
-    def create_user(self, pydantic_user: PydanticUser) -> PydanticUser:
+    async def create_user(self, pydantic_user: PydanticUser) -> PydanticUser:
         """Create a new user if it doesn't already exist."""
         with self.session_maker() as session:
             new_user = UserModel(**pydantic_user.model_dump())
-            new_user.create(session)
-            return new_user.to_pydantic()
+            await new_user.acreate(session)
+            return await new_user.to_pydantic()
 
     @enforce_types
-    def update_user(self, user_update: UserUpdate) -> PydanticUser:
+    async def update_user(self, user_update: UserUpdate) -> PydanticUser:
         """Update user details."""
         with self.session_maker() as session:
             # Retrieve the existing user by ID
-            existing_user = UserModel.read(db_session=session, identifier=user_update.id)
+            existing_user = UserModel.aread(db_session=session, identifier=user_update.id)
 
             # Update only the fields that are provided in UserUpdate
             update_data = user_update.model_dump(exclude_unset=True, exclude_none=True)
@@ -62,16 +62,16 @@ class UserManager:
                 setattr(existing_user, key, value)
 
             # Commit the updated user
-            existing_user.update(session)
-            return existing_user.to_pydantic()
+            await existing_user.aupdate(session)
+            return await existing_user.to_pydantic()
 
     @enforce_types
-    def delete_user_by_id(self, user_id: str):
+    async def delete_user_by_id(self, user_id: str):
         """Delete a user and their associated records (agents, sources, mappings)."""
         with self.session_maker() as session:
             # Delete from user table
-            user = UserModel.read(db_session=session, identifier=user_id)
-            user.delete(session)
+            user = UserModel.aread(db_session=session, identifier=user_id)
+            await user.adelete(session)
 
             # TODO: Integrate this via the ORM models for the Agent, Source, and AgentSourceMapping
             # Cascade delete for related models: Agent, Source, AgentSourceMapping
@@ -79,26 +79,29 @@ class UserManager:
             # session.query(SourceModel).filter(SourceModel.user_id == user_id).delete()
             # session.query(AgentSourceMappingModel).filter(AgentSourceMappingModel.user_id == user_id).delete()
 
-            session.commit()
+            await session.commit()
 
     @enforce_types
-    def get_user_by_id(self, user_id: str) -> PydanticUser:
+    async def get_user_by_id(self, user_id: str) -> PydanticUser:
         """Fetch a user by ID."""
         with self.session_maker() as session:
-            user = UserModel.read(db_session=session, identifier=user_id)
-            return user.to_pydantic()
+            user = UserModel.aread(db_session=session, identifier=user_id)
+            return await user.to_pydantic()
 
     @enforce_types
-    def get_default_user(self) -> PydanticUser:
+    async def get_default_user(self) -> PydanticUser:
         """Fetch the default user."""
-        return self.get_user_by_id(self.DEFAULT_USER_ID)
+        return await self.get_user_by_id(self.DEFAULT_USER_ID)
 
     @enforce_types
-    def list_users(self, cursor: Optional[str] = None, limit: Optional[int] = 50) -> Tuple[Optional[str], List[PydanticUser]]:
+    async def list_users(self, cursor: Optional[str] = None, limit: Optional[int] = 50) -> Tuple[Optional[str], List[PydanticUser]]:
         """List users with pagination using cursor (id) and limit."""
         with self.session_maker() as session:
             results = UserModel.list(db_session=session, cursor=cursor, limit=limit)
-            return [user.to_pydantic() for user in results]
+            pydantic_users = []
+            for user in results:
+                pydantic_users.append(await user.to_pydantic())
+            return pydantic_users
 
 class AsyncUserManager:
     """Async manager class to handle business logic related to Users."""
@@ -107,8 +110,8 @@ class AsyncUserManager:
     DEFAULT_USER_ID = "user-00000000-0000-4000-8000-000000000000"
 
     def __init__(self):
-        from letta.server.server import db_context
-        self.session_maker = db_context
+        from letta.server.server import async_db_context
+        self.session_maker = async_db_context
 
     @enforce_types
     async def create_default_user(self, org_id: str = OrganizationManager.DEFAULT_ORG_ID) -> PydanticUser:
@@ -128,7 +131,7 @@ class AsyncUserManager:
                 user = UserModel(id=self.DEFAULT_USER_ID, name=self.DEFAULT_USER_NAME, organization_id=org_id)
                 await user.acreate(session)
 
-            return user.to_pydantic()
+            return await user.to_pydantic()
 
     @enforce_types
     async def create_user(self, pydantic_user: PydanticUser) -> PydanticUser:
@@ -136,7 +139,7 @@ class AsyncUserManager:
         async with self.session_maker() as session:
             new_user = UserModel(**pydantic_user.model_dump())
             await new_user.acreate(session)
-            return new_user.to_pydantic()
+            return await new_user.to_pydantic()
 
     @enforce_types
     async def update_user(self, user_update: UserUpdate) -> PydanticUser:
@@ -152,7 +155,7 @@ class AsyncUserManager:
 
             # Commit the updated user
             await existing_user.aupdate(session)
-            return existing_user.to_pydantic()
+            return await existing_user.to_pydantic()
 
     @enforce_types
     async def delete_user_by_id(self, user_id: str):
@@ -175,7 +178,7 @@ class AsyncUserManager:
         """Fetch a user by ID."""
         async with self.session_maker() as session:
             user = await UserModel.aread(db_session=session, identifier=user_id)
-            return user.to_pydantic()
+            return await user.to_pydantic()
 
     @enforce_types
     async def get_default_user(self) -> PydanticUser:
@@ -186,5 +189,8 @@ class AsyncUserManager:
     async def list_users(self, cursor: Optional[str] = None, limit: Optional[int] = 50) -> List[PydanticUser]:
         """List users with pagination using cursor (id) and limit."""
         async with self.session_maker() as session:
-            results = await UserModel.alist(db_session=session, cursor=cursor, limit=limit)
-            return [user.to_pydantic() for user in results]
+            results = await UserModel.list(db_session=session, cursor=cursor, limit=limit)
+            pydantic_users = []
+            for user in results:
+                pydantic_users.append(await user.to_pydantic())
+            return pydantic_users

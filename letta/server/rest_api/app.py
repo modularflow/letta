@@ -37,13 +37,13 @@ from letta.server.rest_api.routers.v1.users import (
     router as users_router,  # TODO: decide on admin
 )
 from letta.server.rest_api.static_files import mount_static_files
-from letta.server.server import SyncServer
+from letta.server.server import AsyncServer
 from letta.settings import settings
 
 # TODO(ethan)
 # NOTE(charles): @ethan I had to add this to get the global as the bottom to work
 interface: StreamingServerInterface = StreamingServerInterface
-server = SyncServer(default_interface_factory=lambda: interface())
+server = AsyncServer(default_interface_factory=lambda: interface())
 
 # TODO: remove
 password = None
@@ -97,7 +97,7 @@ def generate_openapi_schema(app: FastAPI):
 def create_application() -> "FastAPI":
     """the application start routine"""
     # global server
-    # server = SyncServer(default_interface_factory=lambda: interface())
+    # server = AsyncServer(default_interface_factory=lambda: interface())
     print(f"\n[[ Letta server // v{__version__} ]]")
 
     app = FastAPI(

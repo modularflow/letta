@@ -7,7 +7,7 @@ import websockets
 
 import letta.server.ws_api.protocol as protocol
 from letta.server.constants import WS_DEFAULT_PORT
-from letta.server.server import SyncServer
+from letta.server.server import AsyncServer
 from letta.server.ws_api.interface import SyncWebSocketInterface
 
 
@@ -16,7 +16,7 @@ class WebSocketServer:
         self.host = host
         self.port = port
         self.interface = SyncWebSocketInterface()
-        self.server = SyncServer(default_interface=self.interface)
+        self.server = AsyncServer(default_interface=self.interface)
 
     def shutdown_server(self):
         try:

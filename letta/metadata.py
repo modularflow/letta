@@ -1,8 +1,11 @@
 """ Metadata store for user/agent/data_source information"""
 
+import json
 import os
 import secrets
-from typing import List, Optional
+import uuid
+from datetime import datetime
+from typing import List, Optional, Type, Union
 
 from sqlalchemy import (
     BIGINT,
@@ -10,10 +13,13 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
     String,
     TypeDecorator,
+    select,
+    update,
 )
 from sqlalchemy.sql import func
 
@@ -61,7 +67,7 @@ class FileMetadataModel(Base):
     def __repr__(self):
         return f"<FileMetadata(id='{self.id}', source_id='{self.source_id}', file_name='{self.file_name}')>"
 
-    def to_record(self):
+    async def to_record(self):
         return FileMetadata(
             id=self.id,
             user_id=self.user_id,
@@ -82,7 +88,7 @@ class LLMConfigColumn(TypeDecorator):
     impl = JSON
     cache_ok = True
 
-    def load_dialect_impl(self, dialect):
+    def load_dialect_impl(self, dialect): 
         return dialect.type_descriptor(JSON())
 
     def process_bind_param(self, value, dialect):
@@ -167,7 +173,7 @@ class ToolCallColumn(TypeDecorator):
 
 
 class APIKeyModel(Base):
-    """Data model for authentication tokens. One-to-many relationship with UserModel (1 User - N tokens)."""
+    """Data model for authentication tokens. One-to-many relationship async with UserModel (1 User - N tokens)."""
 
     __tablename__ = "tokens"
 
@@ -185,7 +191,7 @@ class APIKeyModel(Base):
     def __repr__(self) -> str:
         return f"<APIKey(id='{self.id}', key='{self.key}', name='{self.name}')>"
 
-    def to_record(self) -> User:
+    async def to_record(self) -> User:
         return APIKey(
             id=self.id,
             user_id=self.user_id,
@@ -194,7 +200,7 @@ class APIKeyModel(Base):
         )
 
 
-def generate_api_key(prefix="sk-", length=51) -> str:
+async def generate_api_key(prefix="sk-", length=51) -> str:
     # Generate 'length // 2' bytes because each byte becomes two hex digits. Adjust length for prefix.
     actual_length = max(length - len(prefix), 1) // 2  # Ensure at least 1 byte is generated
     random_bytes = secrets.token_bytes(actual_length)
@@ -238,7 +244,7 @@ class ToolRulesColumn(TypeDecorator):
 
 
 class AgentModel(Base):
-    """Defines data model for storing Passages (consisting of text, embedding)"""
+    """async defines data model for storing Passages (consisting of text, embedding)"""
 
     __tablename__ = "agents"
     __table_args__ = {"extend_existing": True}
@@ -271,7 +277,7 @@ class AgentModel(Base):
     def __repr__(self) -> str:
         return f"<Agent(id='{self.id}', name='{self.name}')>"
 
-    def to_record(self) -> AgentState:
+    async def to_record(self) -> AgentState:
         agent_state = AgentState(
             id=self.id,
             user_id=self.user_id,
@@ -293,13 +299,13 @@ class AgentModel(Base):
 
 
 class SourceModel(Base):
-    """Defines data model for storing Passages (consisting of text, embedding)"""
+    """async defines data model for storing Passages (consisting of text, embedding)"""
 
     __tablename__ = "sources"
     __table_args__ = {"extend_existing": True}
 
     # Assuming passage_id is the primary key
-    # id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # id = Column(UUID(as_uuid=True), primary_key=True, async default=uuid.uuid4)
     id = Column(String, primary_key=True)
     user_id = Column(String, nullable=False)
     name = Column(String, nullable=False)
@@ -314,7 +320,7 @@ class SourceModel(Base):
     def __repr__(self) -> str:
         return f"<Source(passage_id='{self.id}', name='{self.name}')>"
 
-    def to_record(self) -> Source:
+    async def to_record(self) -> Source:
         return Source(
             id=self.id,
             user_id=self.user_id,
@@ -359,7 +365,7 @@ class BlockModel(Base):
     def __repr__(self) -> str:
         return f"<Block(id='{self.id}', template_name='{self.template_name}', template='{self.template_name}', label='{self.label}', user_id='{self.user_id}')>"
 
-    def to_record(self) -> Block:
+    async def to_record(self) -> Block:
         if self.label == "persona":
             return Persona(
                 id=self.id,
@@ -412,7 +418,7 @@ class JobModel(Base):
     def __repr__(self) -> str:
         return f"<Job(id='{self.id}', status='{self.status}')>"
 
-    def to_record(self):
+    async def to_record(self):
         return Job(
             id=self.id,
             user_id=self.user_id,
@@ -441,9 +447,9 @@ class MetadataStore:
         # Ensure valid URI
         assert self.uri, "Database URI is not provided or is invalid."
 
-        from letta.server.server import db_context
+        from letta.server.server import db_context, async_db_context
 
-        self.session_maker = db_context
+        self.async_session_maker = async_db_context
 
     @enforce_types
     async def get_agent(
@@ -452,49 +458,66 @@ class MetadataStore:
         agent_name: Optional[str] = None,
         user_id: Optional[str] = None
     ) -> Optional[AgentState]:
-        with self.session_maker() as session:
+        async with self.async_session_maker() as session:
             if agent_id:
-                results = session.query(AgentModel).filter(AgentModel.id == agent_id).all()
+                query = select(AgentModel).where(AgentModel.id == agent_id)
+                result = await session.execute(query)
+                results = result.scalars().all()
             else:
                 assert agent_name is not None and user_id is not None, "Must provide either agent_id or agent_name"
-                results = session.query(AgentModel).filter(AgentModel.name == agent_name).filter(AgentModel.user_id == user_id).all()
+                query = select(AgentModel).where(AgentModel.name == agent_name).where(AgentModel.user_id == user_id)
+                result = await session.execute(query)
+                results = result.scalars().all()
 
             if len(results) == 0:
                 return None
             assert len(results) == 1, f"Expected 1 result, got {len(results)}"  # should only be one result
-            return results[0].to_record()
+            return await results[0].to_record()
 
     @enforce_types
     async def update_agent(self, agent_state: AgentState):
-        with self.session_maker() as session:
+        async with self.async_session_maker() as session:
             fields = vars(agent_state)
             if isinstance(agent_state.memory, Memory):  # TODO: this is nasty but this whole class will soon be removed so whatever
                 fields["memory"] = agent_state.memory.to_dict()
             del fields["_internal_memory"]
             del fields["tags"]
-            session.query(AgentModel).filter(AgentModel.id == agent_state.id).update(fields)
-            session.commit()
+            
+            query = update(AgentModel).where(AgentModel.id == agent_state.id).values(**fields)
+            await session.execute(query)
+            await session.commit()
 
     @enforce_types
     async def create_agent(self, agent_state: AgentState):
         # insert into agent table
         # make sure agent.name does not already exist for user user_id
-        with self.session_maker() as session:
-            if session.query(AgentModel).filter(AgentModel.name == agent_state.name).filter(AgentModel.user_id == agent_state.user_id).count() > 0:
-                raise ValueError(f"Agent with name {agent_state.name} already exists")
+        async with self.async_session_maker() as session:
+            # Check if agent async with same name exists
+            query = select(func.count()).select_from(AgentModel).where(
+                AgentModel.name == agent_state.name, 
+                AgentModel.user_id == agent_state.user_id
+            )
+            result = await session.execute(query)
+            count = result.scalar_one()
+            
+            if count > 0:
+                raise ValueError(f"Agent async with name {agent_state.name} already exists")
+                
             fields = vars(agent_state)
             fields["memory"] = agent_state.memory.to_dict()
             del fields["_internal_memory"]
             del fields["tags"]
-            session.add(AgentModel(**fields))
-            session.commit()
+            
+            agent_model = AgentModel(**fields)
+            session.add(agent_model)
+            await session.commit()
 
     @enforce_types
-    def create_api_key(self, user_id: str, name: str) -> APIKey:
+    async def create_api_key(self, user_id: str, name: str) -> APIKey:
         """Create an API key for a user"""
         new_api_key = generate_api_key()
-        with self.session_maker() as session:
-            if session.query(APIKeyModel).filter(APIKeyModel.key == new_api_key).count() > 0:
+        async with self.async_session_maker() as session:
+            if select(APIKeyModel).where(APIKeyModel.key == new_api_key).count() > 0:
                 # NOTE duplicate API keys / tokens should never happen, but if it does don't allow it
                 raise ValueError(f"Token {new_api_key} already exists")
             # TODO store the API keys as hashed
@@ -505,84 +528,94 @@ class MetadataStore:
         return self.get_api_key(api_key=new_api_key)
 
     @enforce_types
-    def delete_api_key(self, api_key: str):
+    async def delete_api_key(self, api_key: str):
         """Delete an API key from the database"""
-        with self.session_maker() as session:
-            session.query(APIKeyModel).filter(APIKeyModel.key == api_key).delete()
+        async with self.async_session_maker() as session:
+            select(APIKeyModel).where(APIKeyModel.key == api_key).delete()
             session.commit()
 
     @enforce_types
-    def get_api_key(self, api_key: str) -> Optional[APIKey]:
-        with self.session_maker() as session:
-            results = session.query(APIKeyModel).filter(APIKeyModel.key == api_key).all()
+    async def get_api_key(self, api_key: str) -> Optional[APIKey]:
+        async with self.async_session_maker() as session:
+            results = await session.execute(select(APIKeyModel).where(APIKeyModel.key == api_key))
+            results = results.scalars().all()
             if len(results) == 0:
                 return None
-            assert len(results) == 1, f"Expected 1 result, got {len(results)}"  # should only be one result
-            return results[0].to_record()
+            assert len(results) == 1, f"Expected 1 result, got {len(results)}"
+            return await results[0].to_record()
 
     @enforce_types
-    def get_all_api_keys_for_user(self, user_id: str) -> List[APIKey]:
-        with self.session_maker() as session:
-            results = session.query(APIKeyModel).filter(APIKeyModel.user_id == user_id).all()
-            tokens = [r.to_record() for r in results]
+    async def get_all_api_keys_for_user(self, user_id: str) -> List[APIKey]:
+        async with self.async_session_maker() as session:
+            query = select(APIKeyModel).where(APIKeyModel.user_id == user_id)
+            result = await session.execute(query)
+            results = result.scalars().all()
+            tokens = [await r.to_record() for r in results]
             return tokens
 
     @enforce_types
-    def create_source(self, source: Source):
-        with self.session_maker() as session:
-            if session.query(SourceModel).filter(SourceModel.name == source.name).filter(SourceModel.user_id == source.user_id).count() > 0:
+    async def create_source(self, source: Source):
+        async with self.async_session_maker() as session:
+            # Check if source exists
+            query = select(func.count()).select_from(SourceModel).where(
+                SourceModel.name == source.name, 
+                SourceModel.user_id == source.user_id
+            )
+            result = await session.execute(query)
+            count = result.scalar_one()
+            
+            if count > 0:
                 raise ValueError(f"Source with name {source.name} already exists for user {source.user_id}")
             session.add(SourceModel(**vars(source)))
-            session.commit()
+            await session.commit()
 
     @enforce_types
-    def create_block(self, block: Block):
-        with self.session_maker() as session:
-            # TODO: fix?
-            # we are only validating that more than one template block
-            # with a given name doesn't exist.
-            if (
-                session.query(BlockModel)
-                .filter(BlockModel.template_name == block.template_name)
-                .filter(BlockModel.user_id == block.user_id)
-                .filter(BlockModel.template == True)
-                .filter(BlockModel.label == block.label)
-                .count()
-                > 0
-            ):
-
+    async def create_block(self, block: Block):
+        async with self.async_session_maker() as session:
+            # Check if template block exists
+            query = select(func.count()).select_from(BlockModel).where(
+                BlockModel.template_name == block.template_name,
+                BlockModel.user_id == block.user_id,
+                BlockModel.template == True,
+                BlockModel.label == block.label
+            )
+            result = await session.execute(query)
+            count = result.scalar_one()
+            
+            if count > 0:
                 raise ValueError(f"Block with name {block.template_name} already exists")
             session.add(BlockModel(**vars(block)))
+            await session.commit()
+
+    @enforce_types
+    async def update_source(self, source: Source):
+        async with self.async_session_maker() as session:
+            stmt = update(SourceModel).where(SourceModel.id == source.id).values(**vars(source))
+            await session.execute(stmt)
+            await session.commit()
+
+    @enforce_types
+    async def update_block(self, block: Block):
+        async with self.async_session_maker() as session:
+            select(BlockModel).where(BlockModel.id == block.id).update(vars(block))
             session.commit()
 
     @enforce_types
-    def update_source(self, source: Source):
-        with self.session_maker() as session:
-            session.query(SourceModel).filter(SourceModel.id == source.id).update(vars(source))
-            session.commit()
-
-    @enforce_types
-    def update_block(self, block: Block):
-        with self.session_maker() as session:
-            session.query(BlockModel).filter(BlockModel.id == block.id).update(vars(block))
-            session.commit()
-
-    @enforce_types
-    def update_or_create_block(self, block: Block):
-        with self.session_maker() as session:
-            existing_block = session.query(BlockModel).filter(BlockModel.id == block.id).first()
+    async def update_or_create_block(self, block: Block):
+        async with self.async_session_maker() as session:
+            existing_block = select(BlockModel).where(BlockModel.id == block.id).first()
             if existing_block:
-                session.query(BlockModel).filter(BlockModel.id == block.id).update(vars(block))
+                select(BlockModel).where(BlockModel.id == block.id).update(vars(block))
             else:
                 session.add(BlockModel(**vars(block)))
             session.commit()
 
     @enforce_types
-    def delete_file_from_source(self, source_id: str, file_id: str, user_id: Optional[str]):
-        with self.session_maker() as session:
+    async def delete_file_from_source(self, source_id: str, file_id: str, user_id: Optional[str]):
+        async with self.async_session_maker() as session:
             file_metadata = (
-                session.query(FileMetadataModel)
-                .filter(FileMetadataModel.source_id == source_id, FileMetadataModel.id == file_id, FileMetadataModel.user_id == user_id)
+                select(FileMetadataModel)
+                .where(FileMetadataModel.source_id == source_id, FileMetadataModel.id == file_id, FileMetadataModel.user_id == user_id)
                 .first()
             )
 
@@ -593,123 +626,127 @@ class MetadataStore:
             return file_metadata
 
     @enforce_types
-    def delete_block(self, block_id: str):
-        with self.session_maker() as session:
-            session.query(BlockModel).filter(BlockModel.id == block_id).delete()
+    async def delete_block(self, block_id: str):
+        async with self.async_session_maker() as session:
+            select(BlockModel).where(BlockModel.id == block_id).delete()
             session.commit()
 
     @enforce_types
-    def delete_agent(self, agent_id: str):
-        with self.session_maker() as session:
+    async def delete_agent(self, agent_id: str):
+        async with self.async_session_maker() as session:
 
             # delete agents
-            session.query(AgentModel).filter(AgentModel.id == agent_id).delete()
+            select(AgentModel).where(AgentModel.id == agent_id).delete()
 
             # delete mappings
-            session.query(AgentSourceMappingModel).filter(AgentSourceMappingModel.agent_id == agent_id).delete()
+            select(AgentSourceMappingModel).where(AgentSourceMappingModel.agent_id == agent_id).delete()
 
             session.commit()
 
     @enforce_types
-    def delete_source(self, source_id: str):
-        with self.session_maker() as session:
+    async def delete_source(self, source_id: str):
+        async with self.async_session_maker() as session:
             # delete from sources table
-            session.query(SourceModel).filter(SourceModel.id == source_id).delete()
+            select(SourceModel).where(SourceModel.id == source_id).delete()
 
             # delete any mappings
-            session.query(AgentSourceMappingModel).filter(AgentSourceMappingModel.source_id == source_id).delete()
+            select(AgentSourceMappingModel).where(AgentSourceMappingModel.source_id == source_id).delete()
 
             session.commit()
 
     @enforce_types
-    def list_agents(self, user_id: str) -> List[AgentState]:
-        with self.session_maker() as session:
-            results = session.query(AgentModel).filter(AgentModel.user_id == user_id).all()
-            return [r.to_record() for r in results]
+    async def list_sources(self, user_id: str) -> List[Source]:
+        """Lists available sources given user_id"""
+        async with self.async_session_maker() as session:
+            results = await session.execute(select(SourceModel).where(SourceModel.user_id == user_id))
+            return [await r.to_record() for r in results.scalars().all()]
 
     @enforce_types
-    def list_sources(self, user_id: str) -> List[Source]:
-        with self.session_maker() as session:
-            results = session.query(SourceModel).filter(SourceModel.user_id == user_id).all()
-            return [r.to_record() for r in results]
+    async def list_agents(self, user_id: str) -> List[AgentState]:
+        """Lists available agents given user id"""
+        async with self.async_session_maker() as session:
+            results = await session.execute(select(AgentModel).where(AgentModel.user_id == user_id))
+            return [await r.to_record() for r in results.scalars().all()]
 
     @enforce_types
-    def get_source(
+    async def get_source(
         self, source_id: Optional[str] = None, user_id: Optional[str] = None, source_name: Optional[str] = None
     ) -> Optional[Source]:
-        with self.session_maker() as session:
+        async with self.async_session_maker() as session:
             if source_id:
-                results = session.query(SourceModel).filter(SourceModel.id == source_id).all()
+                results = await session.execute(select(SourceModel).where(SourceModel.id == source_id))
             else:
                 assert user_id is not None and source_name is not None
-                results = session.query(SourceModel).filter(SourceModel.name == source_name).filter(SourceModel.user_id == user_id).all()
+                results = await session.execute(select(SourceModel).where(SourceModel.name == source_name).where(SourceModel.user_id == user_id))
             if len(results) == 0:
                 return None
             assert len(results) == 1, f"Expected 1 result, got {len(results)}"
-            return results[0].to_record()
+            return await results[0].to_record()
 
     @enforce_types
-    def get_block(self, block_id: str) -> Optional[Block]:
-        with self.session_maker() as session:
-            results = session.query(BlockModel).filter(BlockModel.id == block_id).all()
+    async def get_block(self, block_id: str) -> Optional[Block]:
+        async with self.async_session_maker() as session:
+            results = await session.execute(select(BlockModel).where(BlockModel.id == block_id))
             if len(results) == 0:
                 return None
             assert len(results) == 1, f"Expected 1 result, got {len(results)}"
-            return results[0].to_record()
+            return await results[0].to_record()
 
     @enforce_types
-    def get_blocks(
+    async def get_blocks(
         self,
-        user_id: Optional[str],
+        user_id: Optional[str] = None,
         label: Optional[str] = None,
         template: Optional[bool] = None,
         template_name: Optional[str] = None,
         id: Optional[str] = None,
     ) -> Optional[List[Block]]:
         """List available blocks"""
-        with self.session_maker() as session:
-            query = session.query(BlockModel)
+        async with self.async_session_maker() as session:
+            query = select(BlockModel)
 
             if user_id:
-                query = query.filter(BlockModel.user_id == user_id)
+                query = query.where(BlockModel.user_id == user_id)
 
             if label:
-                query = query.filter(BlockModel.label == label)
+                query = query.where(BlockModel.label == label)
 
             if template_name:
-                query = query.filter(BlockModel.template_name == template_name)
+                query = query.where(BlockModel.template_name == template_name)
 
             if id:
-                query = query.filter(BlockModel.id == id)
+                query = query.where(BlockModel.id == id)
 
             if template:
-                query = query.filter(BlockModel.template == template)
+                query = query.where(BlockModel.template == template)
 
-            results = query.all()
+            results = await session.execute(query)
+            results = results.scalars().all()
 
             if len(results) == 0:
                 return None
 
-            return [r.to_record() for r in results]
+            # Await each to_record() coroutine
+            return [await r.to_record() for r in results]
 
     # agent source metadata
     @enforce_types
-    def attach_source(self, user_id: str, agent_id: str, source_id: str):
-        with self.session_maker() as session:
+    async def attach_source(self, user_id: str, agent_id: str, source_id: str):
+        async with self.async_session_maker() as session:
             # TODO: remove this (is a hack)
             mapping_id = f"{user_id}-{agent_id}-{source_id}"
             session.add(AgentSourceMappingModel(id=mapping_id, user_id=user_id, agent_id=agent_id, source_id=source_id))
             session.commit()
 
     @enforce_types
-    def list_attached_sources(self, agent_id: str) -> List[Source]:
-        with self.session_maker() as session:
-            results = session.query(AgentSourceMappingModel).filter(AgentSourceMappingModel.agent_id == agent_id).all()
+    async def list_attached_sources(self, agent_id: str) -> List[Source]:
+        async with self.async_session_maker() as session:
+            results = await session.execute(select(AgentSourceMappingModel).where(AgentSourceMappingModel.agent_id == agent_id))
 
             sources = []
             # make sure source exists
             for r in results:
-                source = self.get_source(source_id=r.source_id)
+                source = await self.get_source(source_id=r.source_id)
                 if source:
                     sources.append(source)
                 else:
@@ -717,14 +754,14 @@ class MetadataStore:
             return sources
 
     @enforce_types
-    def list_attached_agents(self, source_id: str) -> List[str]:
-        with self.session_maker() as session:
-            results = session.query(AgentSourceMappingModel).filter(AgentSourceMappingModel.source_id == source_id).all()
+    async def list_attached_agents(self, source_id: str) -> List[str]:
+        async with self.async_session_maker() as session:
+            results = await session.execute(select(AgentSourceMappingModel).where(AgentSourceMappingModel.source_id == source_id))
 
             agent_ids = []
             # make sure agent exists
             for r in results:
-                agent = self.get_agent(agent_id=r.agent_id)
+                agent = await self.get_agent(agent_id=r.agent_id)
                 if agent:
                     agent_ids.append(r.agent_id)
                 else:
@@ -732,67 +769,68 @@ class MetadataStore:
             return agent_ids
 
     @enforce_types
-    def detach_source(self, agent_id: str, source_id: str):
-        with self.session_maker() as session:
-            session.query(AgentSourceMappingModel).filter(
+    async def detach_source(self, agent_id: str, source_id: str):
+        async with self.async_session_maker() as session:
+            select(AgentSourceMappingModel).where(
                 AgentSourceMappingModel.agent_id == agent_id, AgentSourceMappingModel.source_id == source_id
             ).delete()
             session.commit()
 
     @enforce_types
-    def create_job(self, job: Job):
-        with self.session_maker() as session:
+    async def create_job(self, job: Job):
+        async with self.async_session_maker() as session:
             session.add(JobModel(**vars(job)))
             session.commit()
 
     @enforce_types
-    def list_files_from_source(self, source_id: str, limit: int, cursor: Optional[str]):
-        with self.session_maker() as session:
-            # Start with the basic query filtered by source_id
-            query = session.query(FileMetadataModel).filter(FileMetadataModel.source_id == source_id)
+    async def list_files_from_source(self, source_id: str, limit: int, cursor: Optional[str]):
+        async with self.async_session_maker() as session:
+            # Start async with the basic query filtered by source_id
+            query = select(FileMetadataModel).where(FileMetadataModel.source_id == source_id)
 
             if cursor:
                 # Assuming cursor is the ID of the last file in the previous page
-                query = query.filter(FileMetadataModel.id > cursor)
+                query = query.where(FileMetadataModel.id > cursor)
 
             # Order by ID or other ordering criteria to ensure correct pagination
             query = query.order_by(FileMetadataModel.id)
 
             # Limit the number of results returned
-            results = query.limit(limit).all()
+            results = await session.execute(query.limit(limit))
 
             # Convert the results to the required FileMetadata objects
             files = [r.to_record() for r in results]
 
             return files
 
-    def delete_job(self, job_id: str):
-        with self.session_maker() as session:
-            session.query(JobModel).filter(JobModel.id == job_id).delete()
+    async def delete_job(self, job_id: str):
+        async with self.async_session_maker() as session:
+            select(JobModel).where(JobModel.id == job_id).delete()
             session.commit()
 
-    def get_job(self, job_id: str) -> Optional[Job]:
-        with self.session_maker() as session:
-            results = session.query(JobModel).filter(JobModel.id == job_id).all()
+    async def get_job(self, job_id: str) -> Optional[Job]:
+        async with self.async_session_maker() as session:
+            results = await session.execute(select(JobModel).where(JobModel.id == job_id))
             if len(results) == 0:
                 return None
             assert len(results) == 1, f"Expected 1 result, got {len(results)}"
-            return results[0].to_record()
+            result = results.scalar_one()
+            return await result.to_record()
 
-    def list_jobs(self, user_id: str) -> List[Job]:
-        with self.session_maker() as session:
-            results = session.query(JobModel).filter(JobModel.user_id == user_id).all()
-            return [r.to_record() for r in results]
+    async def list_jobs(self, user_id: str) -> List[Job]:
+        async with self.async_session_maker() as session:
+            results = await session.execute(select(JobModel).where(JobModel.user_id == user_id))
+            return [await r.to_record() for r in results.scalars().all()]
 
-    def update_job(self, job: Job) -> Job:
-        with self.session_maker() as session:
-            session.query(JobModel).filter(JobModel.id == job.id).update(vars(job))
+    async def update_job(self, job: Job) -> Job:
+        async with self.async_session_maker() as session:
+            select(JobModel).where(JobModel.id == job.id).update(vars(job))
             session.commit()
         return Job
 
-    def update_job_status(self, job_id: str, status: JobStatus):
-        with self.session_maker() as session:
-            session.query(JobModel).filter(JobModel.id == job_id).update({"status": status})
+    async def update_job_status(self, job_id: str, status: JobStatus):
+        async with self.async_session_maker() as session:
+            select(JobModel).where(JobModel.id == job_id).update({"status": status})
             if status == JobStatus.COMPLETED:
-                session.query(JobModel).filter(JobModel.id == job_id).update({"completed_at": get_utc_time()})
+                select(JobModel).where(JobModel.id == job_id).update({"completed_at": get_utc_time()})
             session.commit()

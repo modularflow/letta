@@ -9,7 +9,7 @@ from letta.constants import CLI_WARNING_PREFIX
 from letta.functions.schema_generator import generate_schema
 
 
-def derive_openai_json_schema(source_code: str, name: Optional[str] = None) -> dict:
+async def derive_openai_json_schema(source_code: str, name: Optional[str] = None) -> dict:
     # auto-generate openai schema
     try:
         # Define a custom environment with necessary imports
@@ -32,13 +32,13 @@ def derive_openai_json_schema(source_code: str, name: Optional[str] = None) -> d
         raise RuntimeError(f"Failed to execute source code: {e}")
 
 
-def parse_source_code(func) -> str:
+async def parse_source_code(func) -> str:
     """Parse the source code of a function and remove indendation"""
     source_code = dedent(inspect.getsource(func))
     return source_code
 
 
-def load_function_set(module: ModuleType) -> dict:
+async def load_function_set(module: ModuleType) -> dict:
     """Load the functions and generate schema for them, given a module object"""
     function_dict = {}
 
@@ -63,7 +63,7 @@ def load_function_set(module: ModuleType) -> dict:
     return function_dict
 
 
-def validate_function(module_name, module_full_path):
+async def validate_function(module_name, module_full_path):
     try:
         file = os.path.basename(module_full_path)
         spec = importlib.util.spec_from_file_location(module_name, module_full_path)
@@ -87,7 +87,7 @@ def validate_function(module_name, module_full_path):
     return True, None
 
 
-def load_function_file(filepath: str) -> dict:
+async def load_function_file(filepath: str) -> dict:
     file = os.path.basename(filepath)
     module_name = file[:-3]  # Remove '.py' from filename
     try:
@@ -102,5 +102,5 @@ def load_function_file(filepath: str) -> dict:
             f"'{file}' imports '{missing_package}', but '{missing_package}' is not installed locally - install python package '{missing_package}' to link functions from '{file}' to Letta."
         )
     # load all functions in the module
-    function_dict = load_function_set(module)
+    function_dict = await load_function_set(module)
     return function_dict

@@ -74,8 +74,32 @@ class LLMConfig(BaseModel):
             model_name (str): The name of the model (gpt-4, gpt-4o-mini, letta).
         """
 
-            
-                
+        if model_name == "gemma-3-1b-it":
+            return cls(
+                model="gemma-3-1b-it",
+                model_endpoint_type="lmstudio",
+                model_endpoint="http://127.0.0.1:1234/v1",
+                model_wrapper=None,
+                context_window=30000,
+            )
+        if model_name == "gemma-3-27b-it":
+            return cls(
+                model="gemma-3-27b-it",
+                model_endpoint_type="lmstudio",
+                model_endpoint="http://127.0.0.1:1234/v1",
+                model_wrapper=None,
+                context_window=50000,
+            )
+        
+        if model_name == "mistral-small-3.1-24b-instruct-2503":
+            return cls(
+                model="mistral-small-3.1-24b-instruct-2503",
+                model_endpoint_type="lmstudio",
+                model_endpoint="http://127.0.0.1:1234/v1",
+                model_wrapper=None,
+                context_window=50000,
+            )
+        
         if model_name == "ollama":
             return cls(
                 model="llama3.1:latest",
